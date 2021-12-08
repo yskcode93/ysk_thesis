@@ -24,13 +24,16 @@ from sklearn.model_selection import KFold
 # base package
 import re
 import time
+import numpy as np
+from tqdm import tqdm
+from Bio import SeqIO
 
 # inference mode
 MODE_GREEDY = 0
 MODE_BEAM = 1
 
-def finetune(gpu, world_size, ConverterClass, config, weight_path, n_epochs, batch_size, lr, warmup, use_apex,\
-        strain_ids, run_ids,\
+def cross_validate(gpu, world_size, ConverterClass, config, weight_path, n_epochs, batch_size, lr, warmup, use_apex, finetune,\
+        strain_ids, run_ids, direction, mode,\
         pretrain, pretrain_path,\
         log_interval=1, save_interval=1, output_dir="./Result", random_state=0\
     ):
@@ -41,45 +44,48 @@ def finetune(gpu, world_size, ConverterClass, config, weight_path, n_epochs, bat
     # create local model
     torch.manual_seed(0)
     torch.cuda.set_device(gpu)
-
-    # load pretrained converter
-    dist.barrier()
-    map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
-    pt = torch.load(weight_path, map_location=map_location)
-    model = ConverterClass(**config).to(gpu)
-    model.load_state_dict(pt["model"])
-
-    optimizer = opt.AdamW(model.parameters())
-    criterion = nn.CrossEntropyLoss()
-
-    if use_apex:
-        model, optimizer = amp.initialize(model, optimizer, opt_level='O2')
-
-    model = DDP_APEX(model) if use_apex else DDP(model, device_ids=[gpu])
-
     # 
     sql = """
-        SELECT g1.seq_nc, g2.seq_nc, g1.strain_id, g2.strain_id FROM gene_gene as gg
+        SELECT g1.seq_nc, g2.seq_nc, g1.strain_id, g2.strain_id, g1.id, g2.id FROM gene_gene as gg
         INNER JOIN gene AS g1 ON gg.gene_1_id=g1.id
         INNER JOIN gene AS g2 ON gg.gene_2_id=g2.id
         WHERE gg.run_id IN ({}) AND g1.length_nc <= 2100 AND g2.length_nc <= 2100 AND gg.length_ratio BETWEEN 0.97 AND 1.03;
     """.format(",".join(["%s"]*len(run_ids)))
 
-    X, Y, X_sp, Y_sp = [], [], [], []
+    X, Y, X_sp, Y_sp, X_id, Y_id = [], [], [], [], [], []
 
-    for x, y, x_sp, y_sp in fetchall(sql, run_ids):
+    for x, y, x_sp, y_sp, x_id, y_id in fetchall(sql, run_ids):
         x, y = sanitize(x), sanitize(y)
         x, y = re.split('(...)',x)[1:-1:2], re.split('(...)',y)[1:-1:2]
         x, y = list(map(lambda x: vocab.index(x), x)), list(map(lambda x: vocab.index(x), y))
         x, y = torch.tensor(x), torch.tensor(y)
-        X += [x, y]
-        Y += [y, x]
         x_sp, y_sp = strain_ids.index(x_sp), strain_ids.index(y_sp)
-        X_sp += [x_sp, y_sp]
-        Y_sp += [y_sp, x_sp]
+
+        if direction==0:
+            X += [x, y]
+            Y += [y, x]
+            X_sp += [x_sp, y_sp]
+            Y_sp += [y_sp, x_sp]
+            X_id += [x_id, y_id]
+            Y_id += [y_id, x_id]
+        elif direction==1:
+            X.append(x)
+            Y.append(y)
+            X_sp.append(x_sp)
+            Y_sp.append(y_sp)
+            X_id.append(x_id)
+            Y_id.append(y_id)
+        elif direction==2:
+            X.append(y)
+            Y.append(x)
+            X_sp.append(y_sp)
+            Y_sp.append(x_sp)
+            X_id.append(y_id)
+            Y_id.append(x_id)
 
     X, Y = pad_sequence(X, batch_first=True), pad_sequence(Y, batch_first=True)
     X_sp, Y_sp = torch.tensor(X_sp).unsqueeze(1), torch.tensor(Y_sp).unsqueeze(1)
+    X_id, Y_id = np.array(X_id), np.array(Y_id)
 
     if X.size(1) < 700:
         X = torch.cat((X, torch.zeros(X.size(0), 700-X.size(1)).long()), dim=1)
@@ -87,63 +93,147 @@ def finetune(gpu, world_size, ConverterClass, config, weight_path, n_epochs, bat
     if Y.size(1) < 700:
         Y = torch.cat((Y, torch.zeros(Y.size(0), 700-Y.size(1)).long()), dim=1)
 
-    dataset = dat.TensorDataset(X, Y, Y_sp)
-            
-    # loader
-    sampler = DistributedSampler(
-        dataset,
-        num_replicas=world_size,
-        rank=rank
-    )
-    loader = dat.DataLoader(
-        dataset=dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=True,
-        sampler=sampler
-    )
+    # cross validation
+    kf = KFold(random_state=random_state, shuffle=True)
+    Y_id_set = np.unique(Y_id)
+    
+    for fold_idx, (train_idx, test_idx) in enumerate(kf.split(Y_id_set)):
+        Y_id_set_test = Y_id_set[test_idx]
+        test_idx = np.isin(Y_id, Y_id_set_test)
+        train_idx = ~ test_idx
 
-    # scheduler
-    scheduler = lrs.OneCycleLR(
-        optimizer,
-        lr,
-        epochs = n_epochs,
-        steps_per_epoch = len(loader),
-        pct_start=warmup,
-        anneal_strategy='linear'
-    )
+        # write only source and target
+        write_fna_faa(X[test_idx], "{}/finetune/src_{}".format(output_dir, fold_idx+1), "SRC")
+        write_fna_faa(Y[test_idx], "{}/finetune/tgt_{}".format(output_dir, fold_idx+1), "TGT")
 
-    for i in range(1, n_epochs+1):
-        start = time.time()
+        dataset = dat.TensorDataset(X[train_idx], Y[train_idx], Y_sp[train_idx])
 
-        sampler.set_epoch(i)
+        # load pretrained converter
+        model = ConverterClass(**config).to(gpu)
+        if finetune:
+            dist.barrier()
+            map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+            pt = torch.load(weight_path, map_location=map_location)
+            model.load_state_dict(pt["model"])
 
-        avg_loss = 0
+        optimizer = opt.AdamW(model.parameters())
+        criterion = nn.CrossEntropyLoss()
 
-        for x, y, y_sp in loader:
-            optimizer.zero_grad()
-            x, y, y_sp = x.cuda(non_blocking=True), y.cuda(non_blocking=True), y_sp.cuda(non_blocking=True)
-            out = model(x, x, y_sp)
-            loss = criterion(out.permute(0,2,1), y)
+        if use_apex:
+            model, optimizer = amp.initialize(model, optimizer, opt_level='O2')
 
-            if use_apex:
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
-            else:
-                loss.backward()
+        model = DDP_APEX(model) if use_apex else DDP(model, device_ids=[gpu])
+        # loader
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=world_size,
+            rank=rank
+        )
+        loader = dat.DataLoader(
+            dataset=dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=True,
+            sampler=sampler
+        )
 
-            avg_loss += loss.item()
+        # scheduler
+        scheduler = lrs.OneCycleLR(
+            optimizer,
+            lr,
+            epochs = n_epochs,
+            steps_per_epoch = len(loader),
+            pct_start=warmup,
+            anneal_strategy='linear'
+        )
 
-            optimizer.step()
-            scheduler.step()
+        for i in range(1, n_epochs+1):
+            start = time.time()
 
-        avg_loss /= len(loader)
+            sampler.set_epoch(i)
 
-        if rank == 0 and i%log_interval==0:
-            with open("{}/finetune.log".format(output_dir), "a") as f:
-                f.write("EPOCH({:0=3}%) LOSS: {:.4f} lr={:.4f} x 1e-4 ELAPSED TIME: {:.4f}s\n".format(int(i*100/n_epochs), avg_loss,\
-                    scheduler.get_last_lr()[0]*1e4, time.time()-start))
+            avg_loss = 0
+
+            for x, y, y_sp in loader:
+                optimizer.zero_grad()
+                x, y, y_sp = x.cuda(non_blocking=True), y.cuda(non_blocking=True), y_sp.cuda(non_blocking=True)
+                out = model(x, x, y_sp, y)
+                loss = criterion(out.permute(0,2,1), y)
+
+                if use_apex:
+                    with amp.scale_loss(loss, optimizer) as scaled_loss:
+                        scaled_loss.backward()
+                else:
+                    loss.backward()
+
+                # prevent gradient explosion
+                utils.clip_grad_norm_(model.parameters(), 1)
+
+                avg_loss += loss.item()
+
+                optimizer.step()
+                scheduler.step()
+
+            avg_loss /= len(loader)
+
+            if rank == 0 and i%log_interval==0:
+                with open("{}/finetune.log".format(output_dir), "a") as f:
+                    f.write("FOLD {} EPOCH({:0=3}%) LOSS: {:.4f} lr={:.4f} x 1e-4 ELAPSED TIME: {:.4f}s\n".format(fold_idx+1, int(i*100/n_epochs), avg_loss,\
+                        scheduler.get_last_lr()[0]*1e4, time.time()-start))
+
+            if rank == 0 and (i==0 or i%save_interval==0):
+                checkpoint = {
+                    'model': model.module.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'amp': amp.state_dict(),
+                    'scheduler': scheduler.state_dict()
+                } if use_apex else {
+                    'model': model.module.state_dict(),
+                    'scheduler': scheduler.state_dict()
+                }
+
+                torch.save(checkpoint, "{}/weight/checkpoint_{}_{}.pt".format(output_dir, fold_idx+1, i))
+
+def test_from_fasta(ConverterClass, config, strain_ids, sp, n_epochs, n_folds, mode, device, output_dir="./Result", batch_size=100):
+    for i in tqdm(range(1, n_folds+1)):
+        # source sequences
+        with open("{}/finetune/src_{}.fna".format(output_dir, i), "r") as f:
+            X = list(SeqIO.parse(f, "fasta"))
+
+        X = [sanitize(str(x.seq)) for x in X]
+        X = [re.split('(...)',x)[1:-1:2] for x in X]
+        X = [torch.tensor(list(map(lambda x: vocab.index(x), x))) for x in X]
+        X = pad_sequence(X, batch_first=True)
+        if X.size(1) < 700:
+            X = torch.cat((X, torch.zeros(X.size(0), 700-X.size(1)).long()), dim=1)
+
+        Y_sp = strain_ids.index(sp)
+
+        Y_sp = torch.tensor(Y_sp).unsqueeze(0).repeat(X.size(0), 1)
+
+        X, Y_sp = X.to(device), Y_sp.to(device)
+
+        pt = torch.load("{}/weight/checkpoint_{}.pt".format(output_dir, n_epochs), map_location=lambda storage, loc: storage.cuda(device))
+        model = ConverterClass(**config).to(device)
+        model.load_state_dict(pt["model"])
+        model.eval()
+        del pt
+
+        with torch.no_grad():
+            if mode == MODE_GREEDY:
+                out = model.infer_greedily(X, X, Y_sp, X.size(1), [17, 19, 25])
+            elif mode == MODE_BEAM:
+                outs = []
+                for x, y_sp in zip(torch.split(X, batch_size), torch.split(Y_sp, batch_size)):
+                    out = model.beam_search(x, x, y_sp, x.size(1), 5, [17, 19, 25])
+                    if out.size(1) < 700:
+                        out = torch.cat((out.cpu(), torch.zeros(out.size(0), 700-out.size(1)).long()), dim=1)
+                    outs.append(out.cpu())
+
+                out = torch.cat(outs)
+
+        write_fna_faa(out.cpu(), "{}/finetune/gen_{}".format(output_dir, i), "GEN")        
 
 def test(ConverterClass, config, strain_ids, run_ids, direction, n_epochs, n_samples, mode, device, output_dir="./Result"):
     pt = torch.load("{}/weight/checkpoint_{}.pt".format(output_dir, n_epochs), map_location=lambda storage, loc: storage.cuda(device))

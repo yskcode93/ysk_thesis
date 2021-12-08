@@ -6,6 +6,10 @@ import string
 import itertools
 import math
 import subprocess
+import time
+from tqdm import tqdm
+
+from .hmmer import sequence_search, check, retrieve_result
 
 # translation mapping
 translation_map = {
@@ -152,3 +156,27 @@ def optimize_codon(seq, rscu):
 
     return optimized
     
+def domain_search(seq):
+    result = []
+    for s in tqdm(seq):
+        query = ">query\n"
+        query += str(s.seq)
+
+        task_id = sequence_search(query)
+        
+        while not check(task_id):
+            time.sleep(1)
+
+        res = retrieve_result(task_id)
+
+        if res is None:
+            result.append(res)
+            continue
+        else:
+            cath_ids = []
+            for hit in res["funfam_scan"]["results"][0]["hits"]:
+                cath_ids.append(hit["match_cath_id"]["id"])
+            cath_ids = set(cath_ids)
+            result.append(cath_ids)
+
+    return result

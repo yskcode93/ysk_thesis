@@ -12,6 +12,8 @@ from g_mlp_pytorch import gMLP
 from fast_transformers.builders import TransformerEncoderBuilder, TransformerDecoderBuilder, RecurrentEncoderBuilder, RecurrentDecoderBuilder
 from fast_transformers.masking import LengthMask, TriangularCausalMask
 
+from .file import to_seq, vocab
+
 # this skips layers with the given probability
 def dropout_layers(layers, prob_survival):
     if prob_survival == 1:
@@ -357,12 +359,12 @@ class AutoregressiveConverter(nn.Module):
 
         # downstream prediction
         for i in range(1, max_len):
-            y = torch.cat((sp.repeat(k, 1, 1), self.y_embedding(preds)), dim=1)
+            y = torch.cat((torch.repeat_interleave(sp, k, 0), self.y_embedding(preds)), dim=1)
             y = self.positional_encoding(y)
             out = self.transformer(
-                x.permute(1,0,2).repeat(1, k, 1),
+                torch.repeat_interleave(x.permute(1,0,2), k, 1),
                 y.permute(1,0,2),
-                src_key_padding_mask=x_length_mask.repeat(k, 1)
+                src_key_padding_mask=torch.repeat_interleave(x_length_mask, k, 0)
             )
             out = self.to_logits(out).permute(1,0,2)
             log_lik, cands = torch.topk(F.log_softmax(out[:,-1], dim=1), k)
@@ -382,11 +384,43 @@ class AutoregressiveConverter(nn.Module):
 
             origin = pred.squeeze() // k + torch.arange(0, x.size(0)*k).to(x.device) // k * k
 
-            preds = torch.cat((preds[origin], cands[torch.arange(x.size(0)*k).to(x.device), (pred%k).squeeze()].unsqueeze(1)), dim=1)
+            preds = torch.cat((preds[origin], cands[origin, (pred%k).squeeze()].unsqueeze(1)), dim=1)
 
         return preds
 
 # for pretrain
+# Transformer based converter
+class TransformerEncoder(nn.Module):
+    def __init__(self, n_tokens, seq_len, n_layers, n_heads, query_dimensions, value_dimensions, feed_forward_dimensions,\
+            attention_type, n_species
+        ):
+        super(TransformerEncoder, self).__init__()
+
+        self.layers = TransformerEncoderBuilder.from_kwargs(
+            n_layers = n_layers,
+            n_heads = n_heads,
+            query_dimensions = query_dimensions,
+            value_dimensions = value_dimensions,
+            feed_forward_dimensions = feed_forward_dimensions,
+            attention_type = attention_type
+        ).get()
+
+        dim = n_heads*query_dimensions
+        self.positional_encoding = PositionalEncoding(dim, seq_len)
+        self.codon_embedding = nn.Embedding(n_tokens, dim)
+        self.to_logits = nn.Linear(dim, n_tokens)
+
+        self.species_embedding = nn.Embedding(n_species, dim)
+
+    def forward(self, x, sp):
+        length_mask = LengthMask(torch.sum(x>0, dim=1), 700)
+        x = self.codon_embedding(x)
+        x = self.positional_encoding(x)
+        x = x + self.species_embedding(sp)
+        x = self.layers(x, length_mask=length_mask)
+        
+        return self.to_logits(x)
+
 class SPgMLP(gMLP):
     def __init__(
         self,
