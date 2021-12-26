@@ -34,7 +34,7 @@ MODE_BEAM = 1
 
 def cross_validate(gpu, world_size, ConverterClass, config, weight_path, n_epochs, batch_size, lr, warmup, use_apex, finetune,\
         strain_ids, run_ids, direction, mode,\
-        pretrain, pretrain_path,\
+        pretrain, PretrainClass, config_pretrain, pretrain_path,\
         log_interval=1, save_interval=1, output_dir="./Result", random_state=0\
     ):
     # rank equals gpu when using one node only
@@ -58,8 +58,10 @@ def cross_validate(gpu, world_size, ConverterClass, config, weight_path, n_epoch
         x, y = sanitize(x), sanitize(y)
         x, y = re.split('(...)',x)[1:-1:2], re.split('(...)',y)[1:-1:2]
         x, y = list(map(lambda x: vocab.index(x), x)), list(map(lambda x: vocab.index(x), y))
+        if pretrain:
+            x, y = [len(vocab)] + x, [len(vocab)] + y
         x, y = torch.tensor(x), torch.tensor(y)
-        x_sp, y_sp = strain_ids.index(x_sp), strain_ids.index(y_sp)
+        x_sp, y_sp = 0, 1#strain_ids.index(x_sp), strain_ids.index(y_sp)
 
         if direction==0:
             X += [x, y]
@@ -87,11 +89,22 @@ def cross_validate(gpu, world_size, ConverterClass, config, weight_path, n_epoch
     X_sp, Y_sp = torch.tensor(X_sp).unsqueeze(1), torch.tensor(Y_sp).unsqueeze(1)
     X_id, Y_id = np.array(X_id), np.array(Y_id)
 
-    if X.size(1) < 700:
-        X = torch.cat((X, torch.zeros(X.size(0), 700-X.size(1)).long()), dim=1)
+    max_length = 701 if pretrain else 700
 
-    if Y.size(1) < 700:
-        Y = torch.cat((Y, torch.zeros(Y.size(0), 700-Y.size(1)).long()), dim=1)
+    if X.size(1) < max_length:
+        X = torch.cat((X, torch.zeros(X.size(0), max_length-X.size(1)).long()), dim=1)
+
+    if Y.size(1) < max_length:
+        Y = torch.cat((Y, torch.zeros(Y.size(0), max_length-Y.size(1)).long()), dim=1)
+
+    # pretrain model
+    if pretrain:
+        model_pretrain = PretrainClass(**config_pretrain).to(gpu)
+        dist.barrier()
+        map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+        pt = torch.load(pretrain_path, map_location=map_location)
+        model_pretrain.load_state_dict(pt["model"])
+        model_pretrain.eval()
 
     # cross validation
     kf = KFold(random_state=random_state, shuffle=True)
@@ -103,8 +116,8 @@ def cross_validate(gpu, world_size, ConverterClass, config, weight_path, n_epoch
         train_idx = ~ test_idx
 
         # write only source and target
-        write_fna_faa(X[test_idx], "{}/finetune/src_{}".format(output_dir, fold_idx+1), "SRC")
-        write_fna_faa(Y[test_idx], "{}/finetune/tgt_{}".format(output_dir, fold_idx+1), "TGT")
+        write_fna_faa(X[test_idx, 1:] if pretrain else X[test_idx], "{}/finetune/src_{}".format(output_dir, fold_idx+1), "SRC")
+        write_fna_faa(Y[test_idx, 1:] if pretrain else Y[test_idx], "{}/finetune/tgt_{}".format(output_dir, fold_idx+1), "TGT")
 
         dataset = dat.TensorDataset(X[train_idx], Y[train_idx], Y_sp[train_idx])
 
@@ -115,6 +128,7 @@ def cross_validate(gpu, world_size, ConverterClass, config, weight_path, n_epoch
             map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
             pt = torch.load(weight_path, map_location=map_location)
             model.load_state_dict(pt["model"])
+            model.freeze()
 
         optimizer = opt.AdamW(model.parameters())
         criterion = nn.CrossEntropyLoss()
@@ -158,8 +172,16 @@ def cross_validate(gpu, world_size, ConverterClass, config, weight_path, n_epoch
             for x, y, y_sp in loader:
                 optimizer.zero_grad()
                 x, y, y_sp = x.cuda(non_blocking=True), y.cuda(non_blocking=True), y_sp.cuda(non_blocking=True)
-                out = model(x, x, y_sp, y)
-                loss = criterion(out.permute(0,2,1), y)
+
+                if pretrain:
+                    with torch.no_grad():
+                        x_e = model_pretrain.get_output(x)
+
+                    out = model(x_e, x[:,1:], y_sp, y[:,1:])
+                else:
+                    out = model(x, x, y_sp, y)
+
+                loss = criterion(out.permute(0,2,1), y[:, 1:] if pretrain else y)
 
                 if use_apex:
                     with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -195,7 +217,9 @@ def cross_validate(gpu, world_size, ConverterClass, config, weight_path, n_epoch
 
                 torch.save(checkpoint, "{}/weight/checkpoint_{}_{}.pt".format(output_dir, fold_idx+1, i))
 
-def test_from_fasta(ConverterClass, config, strain_ids, sp, n_epochs, n_folds, mode, device, output_dir="./Result", batch_size=100):
+def test_from_fasta(ConverterClass, config, strain_ids, sp, n_epochs, n_folds, mode, device,\
+    pretrain, PretrainClass, config_pretrain, pretrain_path,\
+    output_dir="./Result", batch_size=100):
     for i in tqdm(range(1, n_folds+1)):
         # source sequences
         with open("{}/finetune/src_{}.fna".format(output_dir, i), "r") as f:
@@ -213,20 +237,34 @@ def test_from_fasta(ConverterClass, config, strain_ids, sp, n_epochs, n_folds, m
         Y_sp = torch.tensor(Y_sp).unsqueeze(0).repeat(X.size(0), 1)
 
         X, Y_sp = X.to(device), Y_sp.to(device)
-
+        # converter class
         pt = torch.load("{}/weight/checkpoint_{}.pt".format(output_dir, n_epochs), map_location=lambda storage, loc: storage.cuda(device))
         model = ConverterClass(**config).to(device)
         model.load_state_dict(pt["model"])
         model.eval()
         del pt
 
+        # pretrain class
+        if pretrain:
+            pt = torch.load(pretrain_path, map_location=lambda storage, loc: storage.cuda(device))
+            model_pretrain = PretrainClass(**config_pretrain).to(device)
+            model_pretrain.load_state_dict(pt["model"])
+            model_pretrain.eval()
+            del pt
+
         with torch.no_grad():
+            if pretrain:
+                cls = torch.tensor([[len(vocab)]]*X.size(0)).to(device)
+                X_e = model_pretrain.get_output(torch.cat((cls, X), dim=1))
+            else:
+                X_e = X
+
             if mode == MODE_GREEDY:
-                out = model.infer_greedily(X, X, Y_sp, X.size(1), [17, 19, 25])
+                out = model.infer_greedily(X_e, X, Y_sp, X.size(1), [17, 19, 25])
             elif mode == MODE_BEAM:
                 outs = []
-                for x, y_sp in zip(torch.split(X, batch_size), torch.split(Y_sp, batch_size)):
-                    out = model.beam_search(x, x, y_sp, x.size(1), 5, [17, 19, 25])
+                for x_e, x, y_sp in zip(torch.split(X_e, batch_size), torch.split(X, batch_size), torch.split(Y_sp, batch_size)):
+                    out = model.beam_search(x_e, x, y_sp, x.size(1), 5, [17, 19, 25])
                     if out.size(1) < 700:
                         out = torch.cat((out.cpu(), torch.zeros(out.size(0), 700-out.size(1)).long()), dim=1)
                     outs.append(out.cpu())
@@ -305,8 +343,8 @@ def test(ConverterClass, config, strain_ids, run_ids, direction, n_epochs, n_sam
 # direction = {0: both, 1: x -> y, 2: y-> x}
 def train(gpu, world_size, ConverterClass, config, n_epochs, batch_size, lr, warmup, use_apex,\
         strain_ids, gene_batch_size, total_count, direction,\
-        pretrain, pretrain_path,\
-        checkpoint,
+        pretrain, PretrainClass, config_pretrain, pretrain_path,\
+        checkpoint,\
         log_interval=10, save_interval=100, output_dir="./Result"\
     ):
     # rank equals gpu when using one node only
@@ -348,6 +386,13 @@ def train(gpu, world_size, ConverterClass, config, n_epochs, batch_size, lr, war
         else:
             scheduler.load_state_dict(chkpt["scheduler"])
 
+    if pretrain:
+        pretrained_model = PretrainClass(**config_pretrain).to(gpu)
+        dist.barrier()
+        map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+        chkpt = torch.load(pretrain_path, map_location=map_location)
+        pretrained_model.load_state_dict(chkpt["model"])
+
     model = DDP_APEX(model) if use_apex else DDP(model, device_ids=[gpu])
 
     # data loader
@@ -355,9 +400,34 @@ def train(gpu, world_size, ConverterClass, config, n_epochs, batch_size, lr, war
         SELECT gg.id, g1.seq_nc, g2.seq_nc, g1.strain_id, g2.strain_id FROM gene_gene as gg
         INNER JOIN gene AS g1 ON gg.gene_1_id=g1.id
         INNER JOIN gene AS g2 ON gg.gene_2_id=g2.id
-        WHERE gg.run_id = 1 AND g1.length_nc <= 2100 AND g2.length_nc <= 2100 AND gg.length_ratio BETWEEN 0.97 AND 1.03 AND gg.id > %s
+        WHERE gg.run_id IN (100, 101) AND g1.length_nc <= 2100 AND g2.length_nc <= 2100 AND gg.length_ratio BETWEEN 0.97 AND 1.03 AND gg.id > %s
         ORDER BY gg.id FETCH FIRST %s ROWS ONLY;
     """
+
+    X_, Y_, X_sp_, Y_sp_ = [], [], [], []
+    for t in tqdm(range(2, 6)):
+        # source sequences
+        with open("{}/finetune/tgt_{}.fna".format(output_dir, t), "r") as f:
+            x = list(SeqIO.parse(f, "fasta"))
+
+        x = [sanitize(str(seq.seq)) for seq in x]
+        x = [re.split('(...)',seq)[1:-1:2] for seq in x]
+        x = [torch.tensor(list(map(lambda x: vocab.index(x), seq))) for seq in x]
+        X_ += x
+
+        # target sequences
+        with open("{}/finetune/src_{}.fna".format(output_dir, t), "r") as f:
+            y = list(SeqIO.parse(f, "fasta"))
+
+        y = [sanitize(str(seq.seq)) for seq in y]
+        y = [re.split('(...)',seq)[1:-1:2] for seq in y]
+        y = [torch.tensor(list(map(lambda x: vocab.index(x), seq))) for seq in y]
+        Y_ += y
+
+        X_sp_ += [1]*len(x)
+        Y_sp_ += [0]*len(y)
+
+    count = len(X_)
     
     for i in range(1, n_epochs+1):
         # start time
@@ -368,11 +438,15 @@ def train(gpu, world_size, ConverterClass, config, n_epochs, batch_size, lr, war
         avg_loss = 0
 
         for j, rows in enumerate(gbl):
-            X, Y, X_sp, Y_sp = [], [], [], []
+            X, Y, X_sp, Y_sp = X_, Y_, X_sp_, Y_sp_
+            del X[count:], Y[count:], X_sp[count:], Y_sp[count:]
+            #X, Y, X_sp, Y_sp = [], [], [], []
             for last_id, x, y, x_sp, y_sp in rows:
                 x, y = sanitize(x), sanitize(y)
                 x, y = re.split('(...)',x)[1:-1:2], re.split('(...)',y)[1:-1:2]
                 x, y = list(map(lambda x: vocab.index(x), x)), list(map(lambda x: vocab.index(x), y))
+                if pretrain:
+                    x, y = [len(vocab)] + x, [len(vocab)] + y
                 x, y = torch.tensor(x), torch.tensor(y)
                 x_sp, y_sp = 0, 1#strain_ids.index(x_sp), strain_ids.index(y_sp)
                 if direction==0:
@@ -390,17 +464,19 @@ def train(gpu, world_size, ConverterClass, config, n_epochs, batch_size, lr, war
                     Y.append(x)
                     X_sp.append(y_sp)
                     Y_sp.append(x_sp)
-
+            
             gbl.last_id = last_id
 
             X, Y = pad_sequence(X, batch_first=True), pad_sequence(Y, batch_first=True)
             X_sp, Y_sp = torch.tensor(X_sp).unsqueeze(1), torch.tensor(Y_sp).unsqueeze(1)
 
-            if X.size(1) < 700:
-                X = torch.cat((X, torch.zeros(X.size(0), 700-X.size(1)).long()), dim=1)
+            max_length = 701 if pretrain else 700
 
-            if Y.size(1) < 700:
-                Y = torch.cat((Y, torch.zeros(Y.size(0), 700-Y.size(1)).long()), dim=1)
+            if X.size(1) < max_length:
+                X = torch.cat((X, torch.zeros(X.size(0), max_length-X.size(1)).long()), dim=1)
+
+            if Y.size(1) < max_length:
+                Y = torch.cat((Y, torch.zeros(Y.size(0), max_length-Y.size(1)).long()), dim=1)
 
             dataset = dat.TensorDataset(X, Y, Y_sp)
             
@@ -426,8 +502,15 @@ def train(gpu, world_size, ConverterClass, config, n_epochs, batch_size, lr, war
             for x, y, y_sp in loader:
                 optimizer.zero_grad()
                 x, y, y_sp = x.cuda(non_blocking=True), y.cuda(non_blocking=True), y_sp.cuda(non_blocking=True)
-                out = model(x, x, y_sp, y)
-                loss = criterion(out.permute(0,2,1), y)
+                
+                if pretrain:
+                    with torch.no_grad():
+                        x_e = pretrained_model.get_output(x)
+                else:
+                    x_e = x
+
+                out = model(x_e, x[:,1:], y_sp, y[:,1:]) if pretrain else model(x_e, x, y_sp, y)
+                loss = criterion(out.permute(0,2,1), y[:,1:] if pretrain else y)
 
                 if use_apex:
                     with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -451,8 +534,8 @@ def train(gpu, world_size, ConverterClass, config, n_epochs, batch_size, lr, war
                     scheduler.get_last_lr()[0]*1e4, time.time()-start))
 
         if rank == 0 and (i==1 or i%save_interval==0):
-            write_fna_faa(x.cpu(), "{}/train/src_{}".format(output_dir, i), "SRC")
-            write_fna_faa(y.cpu(), "{}/train/tgt_{}".format(output_dir, i), "TGT")
+            write_fna_faa(x[:,1:].cpu() if pretrain else x.cpu(), "{}/train/src_{}".format(output_dir, i), "SRC")
+            write_fna_faa(y[:,1:].cpu() if pretrain else y.cpu(), "{}/train/tgt_{}".format(output_dir, i), "TGT")
             write_fna_faa(torch.argmax(out, dim=2).cpu(), "{}/train/gen_{}".format(output_dir, i), "GEN")
 
             checkpoint = {

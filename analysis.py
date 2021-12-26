@@ -165,7 +165,7 @@ def domain_search(seq):
         task_id = sequence_search(query)
         
         while not check(task_id):
-            time.sleep(1)
+            time.sleep(2)
 
         res = retrieve_result(task_id)
 
