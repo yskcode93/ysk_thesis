@@ -171,7 +171,7 @@ class FastAutoregressiveConverter(nn.Module):
         lengths_y = torch.sum(y>0, dim=1)
         x = self.x_embedding(x)
         if self.pretrain:
-            x = self.change_dim(x_e)
+            x = self.change_dim(x_e.detach())
             sp = self.species_embedding(sp)
         else:
             sp = self.species_embedding(sp)

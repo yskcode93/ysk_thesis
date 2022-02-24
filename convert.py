@@ -58,7 +58,7 @@ def cross_validate(gpu, world_size, ConverterClass, config, weight_path, n_epoch
         x, y = sanitize(x), sanitize(y)
         x, y = re.split('(...)',x)[1:-1:2], re.split('(...)',y)[1:-1:2]
         x, y = list(map(lambda x: vocab.index(x), x)), list(map(lambda x: vocab.index(x), y))
-        if pretrain:
+        if pretrain and "n_species" in config_pretrain:
             x, y = [len(vocab)] + x, [len(vocab)] + y
         x, y = torch.tensor(x), torch.tensor(y)
         x_sp, y_sp = 0, 1#strain_ids.index(x_sp), strain_ids.index(y_sp)
@@ -89,7 +89,7 @@ def cross_validate(gpu, world_size, ConverterClass, config, weight_path, n_epoch
     X_sp, Y_sp = torch.tensor(X_sp).unsqueeze(1), torch.tensor(Y_sp).unsqueeze(1)
     X_id, Y_id = np.array(X_id), np.array(Y_id)
 
-    max_length = 701 if pretrain else 700
+    max_length = 701 if pretrain and "n_species" in config_pretrain else 700
 
     if X.size(1) < max_length:
         X = torch.cat((X, torch.zeros(X.size(0), max_length-X.size(1)).long()), dim=1)
@@ -116,8 +116,8 @@ def cross_validate(gpu, world_size, ConverterClass, config, weight_path, n_epoch
         train_idx = ~ test_idx
 
         # write only source and target
-        write_fna_faa(X[test_idx, 1:] if pretrain else X[test_idx], "{}/finetune/src_{}".format(output_dir, fold_idx+1), "SRC")
-        write_fna_faa(Y[test_idx, 1:] if pretrain else Y[test_idx], "{}/finetune/tgt_{}".format(output_dir, fold_idx+1), "TGT")
+        write_fna_faa(X[test_idx, 1:] if pretrain and "n_species" in config_pretrain else X[test_idx], "{}/finetune/src_{}".format(output_dir, fold_idx+1), "SRC")
+        write_fna_faa(Y[test_idx, 1:] if pretrain and "n_species" in config_pretrain else Y[test_idx], "{}/finetune/tgt_{}".format(output_dir, fold_idx+1), "TGT")
 
         dataset = dat.TensorDataset(X[train_idx], Y[train_idx], Y_sp[train_idx])
 
@@ -136,7 +136,7 @@ def cross_validate(gpu, world_size, ConverterClass, config, weight_path, n_epoch
         if use_apex:
             model, optimizer = amp.initialize(model, optimizer, opt_level='O2')
 
-        model = DDP_APEX(model) if use_apex else DDP(model, device_ids=[gpu])
+        model = DDP_APEX(model) if use_apex else DDP(model, device_ids=[gpu], find_unused_parameters=True)
         # loader
         sampler = DistributedSampler(
             dataset,
@@ -177,12 +177,11 @@ def cross_validate(gpu, world_size, ConverterClass, config, weight_path, n_epoch
                     with torch.no_grad():
                         x_e = model_pretrain.get_output(x)
 
-                    out = model(x_e, x[:,1:], y_sp, y[:,1:])
+                    out = model(x_e, x[:,1:], y_sp, y[:,1:]) if pretrain and "n_species" in config_pretrain else model(x_e, x, y_sp, y)
                 else:
                     out = model(x, x, y_sp, y)
 
-                loss = criterion(out.permute(0,2,1), y[:, 1:] if pretrain else y)
-
+                loss = criterion(out.permute(0,2,1), y[:, 1:] if pretrain and "n_species" in config_pretrain else y)
                 if use_apex:
                     with amp.scale_loss(loss, optimizer) as scaled_loss:
                         scaled_loss.backward()
@@ -255,7 +254,7 @@ def test_from_fasta(ConverterClass, config, strain_ids, sp, n_epochs, n_folds, m
         with torch.no_grad():
             if pretrain:
                 cls = torch.tensor([[len(vocab)]]*X.size(0)).to(device)
-                X_e = model_pretrain.get_output(torch.cat((cls, X), dim=1))
+                X_e = model_pretrain.get_output(torch.cat((cls, X), dim=1)) if "n_species" in config_pretrain else model_pretrain.get_output(X)
             else:
                 X_e = X
 
@@ -392,22 +391,23 @@ def train(gpu, world_size, ConverterClass, config, n_epochs, batch_size, lr, war
         map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
         chkpt = torch.load(pretrain_path, map_location=map_location)
         pretrained_model.load_state_dict(chkpt["model"])
+        pretrained_model.eval()
 
-    model = DDP_APEX(model) if use_apex else DDP(model, device_ids=[gpu])
+    model = DDP_APEX(model) if use_apex else DDP(model, device_ids=[gpu], find_unused_parameters=True)
 
     # data loader
     sql = """
         SELECT gg.id, g1.seq_nc, g2.seq_nc, g1.strain_id, g2.strain_id FROM gene_gene as gg
         INNER JOIN gene AS g1 ON gg.gene_1_id=g1.id
         INNER JOIN gene AS g2 ON gg.gene_2_id=g2.id
-        WHERE gg.run_id IN (100, 101) AND g1.length_nc <= 2100 AND g2.length_nc <= 2100 AND gg.length_ratio BETWEEN 0.97 AND 1.03 AND gg.id > %s
+        WHERE gg.run_id IN (549, 548) AND g1.length_nc <= 2100 AND g2.length_nc <= 2100 AND gg.length_ratio BETWEEN 0.97 AND 1.03 AND gg.id > %s
         ORDER BY gg.id FETCH FIRST %s ROWS ONLY;
     """
 
     X_, Y_, X_sp_, Y_sp_ = [], [], [], []
     for t in tqdm(range(2, 6)):
         # source sequences
-        with open("{}/finetune/tgt_{}.fna".format(output_dir, t), "r") as f:
+        with open("{}/finetune/src_{}.fna".format(output_dir, t), "r") as f:
             x = list(SeqIO.parse(f, "fasta"))
 
         x = [sanitize(str(seq.seq)) for seq in x]
@@ -416,7 +416,7 @@ def train(gpu, world_size, ConverterClass, config, n_epochs, batch_size, lr, war
         X_ += x
 
         # target sequences
-        with open("{}/finetune/src_{}.fna".format(output_dir, t), "r") as f:
+        with open("{}/finetune/tgt_{}.fna".format(output_dir, t), "r") as f:
             y = list(SeqIO.parse(f, "fasta"))
 
         y = [sanitize(str(seq.seq)) for seq in y]
@@ -445,7 +445,7 @@ def train(gpu, world_size, ConverterClass, config, n_epochs, batch_size, lr, war
                 x, y = sanitize(x), sanitize(y)
                 x, y = re.split('(...)',x)[1:-1:2], re.split('(...)',y)[1:-1:2]
                 x, y = list(map(lambda x: vocab.index(x), x)), list(map(lambda x: vocab.index(x), y))
-                if pretrain:
+                if pretrain and "n_species" in config_pretrain:
                     x, y = [len(vocab)] + x, [len(vocab)] + y
                 x, y = torch.tensor(x), torch.tensor(y)
                 x_sp, y_sp = 0, 1#strain_ids.index(x_sp), strain_ids.index(y_sp)
@@ -470,7 +470,7 @@ def train(gpu, world_size, ConverterClass, config, n_epochs, batch_size, lr, war
             X, Y = pad_sequence(X, batch_first=True), pad_sequence(Y, batch_first=True)
             X_sp, Y_sp = torch.tensor(X_sp).unsqueeze(1), torch.tensor(Y_sp).unsqueeze(1)
 
-            max_length = 701 if pretrain else 700
+            max_length = 701 if pretrain and "n_species" in config_pretrain else 700
 
             if X.size(1) < max_length:
                 X = torch.cat((X, torch.zeros(X.size(0), max_length-X.size(1)).long()), dim=1)
@@ -509,8 +509,8 @@ def train(gpu, world_size, ConverterClass, config, n_epochs, batch_size, lr, war
                 else:
                     x_e = x
 
-                out = model(x_e, x[:,1:], y_sp, y[:,1:]) if pretrain else model(x_e, x, y_sp, y)
-                loss = criterion(out.permute(0,2,1), y[:,1:] if pretrain else y)
+                out = model(x_e, x[:,1:], y_sp, y[:,1:]) if pretrain and "n_species" in config_pretrain else model(x_e, x, y_sp, y)
+                loss = criterion(out.permute(0,2,1), y[:,1:] if pretrain and "n_species" in config_pretrain else y)
 
                 if use_apex:
                     with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -534,8 +534,8 @@ def train(gpu, world_size, ConverterClass, config, n_epochs, batch_size, lr, war
                     scheduler.get_last_lr()[0]*1e4, time.time()-start))
 
         if rank == 0 and (i==1 or i%save_interval==0):
-            write_fna_faa(x[:,1:].cpu() if pretrain else x.cpu(), "{}/train/src_{}".format(output_dir, i), "SRC")
-            write_fna_faa(y[:,1:].cpu() if pretrain else y.cpu(), "{}/train/tgt_{}".format(output_dir, i), "TGT")
+            write_fna_faa(x[:,1:].cpu() if pretrain and "n_species" in config_pretrain else x.cpu(), "{}/train/src_{}".format(output_dir, i), "SRC")
+            write_fna_faa(y[:,1:].cpu() if pretrain and "n_species" in config_pretrain else y.cpu(), "{}/train/tgt_{}".format(output_dir, i), "TGT")
             write_fna_faa(torch.argmax(out, dim=2).cpu(), "{}/train/gen_{}".format(output_dir, i), "GEN")
 
             checkpoint = {
