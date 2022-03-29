@@ -12,6 +12,8 @@ from g_mlp_pytorch import gMLP
 from fast_transformers.builders import TransformerEncoderBuilder, TransformerDecoderBuilder, RecurrentEncoderBuilder, RecurrentDecoderBuilder
 from fast_transformers.masking import LengthMask, TriangularCausalMask
 
+from .file import to_seq, vocab
+
 # this skips layers with the given probability
 def dropout_layers(layers, prob_survival):
     if prob_survival == 1:
@@ -125,12 +127,11 @@ class TransformerConverter(nn.Module):
         return self.to_logits(x)[:, 1:] # discard first
 
 # Autoregressive Converter
-"""
-class AutoregressiveConverter(nn.Module):
+class FastAutoregressiveConverter(nn.Module):
     def __init__(self, n_tokens, seq_len, n_layers, n_heads, query_dimensions, value_dimensions, feed_forward_dimensions, attention_type,\
             n_species, pretrain = True, **kwargs
         ):
-        super(AutoregressiveConverter, self).__init__()
+        super(FastAutoregressiveConverter, self).__init__()
 
         self.encoder = TransformerEncoderBuilder.from_kwargs(
             n_layers = n_layers,
@@ -153,65 +154,162 @@ class AutoregressiveConverter(nn.Module):
 
         dim = n_heads*query_dimensions
         self.positional_encoding = PositionalEncoding(dim, seq_len)
-        self.codon_embedding = nn.Embedding(n_tokens, dim)
+        self.x_embedding = nn.Embedding(n_tokens, dim)
+        self.y_embedding = nn.Embedding(n_tokens, dim)
         self.to_logits = nn.Linear(dim, n_tokens)
 
         if pretrain:
-            self.register_buffer("species_embedding", kwargs["species_embedding"])
-        else:
-            self.species_embedding = nn.Embedding(n_species, dim)
+            self.change_dim = nn.Linear(512, dim)
+
+        self.species_embedding = nn.Embedding(n_species, dim)
 
         self.pretrain = pretrain
 
     def forward(self, x_e, x, sp, y=None):
         N, max_len = x.size(0), x.size(1)
-        x = self.codon_embedding(x)
-        x = self.positional_encoding(x)
-        y = self.codon_embedding(y)
-        y = self.positional_encoding(y)
-
+        lengths_x = torch.sum(x>0, dim=1)
+        lengths_y = torch.sum(y>0, dim=1)
+        x = self.x_embedding(x)
         if self.pretrain:
-            x = x + x_e
-            sp = self.species_embedding[sp]
+            x = self.change_dim(x_e.detach())
+            sp = self.species_embedding(sp)
         else:
             sp = self.species_embedding(sp)
 
+        x = self.positional_encoding(x)
+        y = self.y_embedding(y)
         # start token is species token
-        y = torch.cat((sp, y), dim=1)
+        y = torch.cat((sp, y[:, :-1]), dim=1)
+        y = self.positional_encoding(y)
+
         # encode source sequences
-        memory = self.encoder(x)
+        length_mask_x = LengthMask(lengths_x, max_len, x.device)
+        memory = self.encoder(x, length_mask = length_mask_x)
         # decode
-        causal_mask = TriangularCausalMask(max_len+1, device = x.device)
-        out = self.decoder(y, memory, causal_mask)
+        causal_mask = TriangularCausalMask(max_len, device = x.device)
+        length_mask_y = LengthMask(lengths_y, max_len, y.device)
+        out = self.decoder(y, memory, x_mask = causal_mask, x_length_mask = length_mask_y, memory_length_mask = length_mask_x)
         
-        return self.to_logits(out[:, :-1]) # discard first
-    
-    @torch.no_grad
+        return self.to_logits(out)
+
     def infer_greedily(self, x_e, x, sp, max_len, eos_tokens=[]):
         # this is inference
         self.eval()
+        # mask
+        lengths_x = torch.sum(x>0, dim=1)
+        length_mask_x = LengthMask(lengths_x, max_len, x.device)
         # generate
-        x = self.codon_embedding(x)
-        x = self.positional_encoding(x)
+        x = self.x_embedding(x)
 
         if self.pretrain:
-            x = x + x_e
-            sp = self.species_embedding[sp]
+            x = self.change_dim(x_e)
+            sp = self.species_embedding(sp)
         else:
             sp = self.species_embedding(sp)
 
-        # encode source sequences
-        memory = self.encoder(x)
+        x = self.positional_encoding(x)
 
-        # sos token is species token
-        preds = torch.empty(x.size(0), 0, device=x.device)
-        for i in range(max_len):
-            causal_mask = TriangularCausalMask(i+1, device=x.device)
-            out = self.decoder(sp, memory, causal_mask)
-            out = self.to_logits(out[:, -1:])
-            pred = torch.argmax(out, dim=2)
+        results = torch.zeros(x.size(0), max_len).long().to(x.device)
+
+        # first prediction
+        sp = self.positional_encoding(sp)
+        memory = self.encoder(x, length_mask = length_mask_x)
+        # decode
+        out = self.decoder(sp, memory, memory_length_mask = length_mask_x)
+
+        out = self.to_logits(out)
+        preds = torch.argmax(out, dim=2)
+        # downstream prediction
+        for i in range(1, max_len):
+            y = torch.cat((sp, self.y_embedding(preds)), dim=1)
+            y = self.positional_encoding(y)
+            
+            memory = self.encoder(x, length_mask = length_mask_x)
+            # decode
+            out = self.decoder(y, memory, memory_length_mask = length_mask_x)
+
+            out = self.to_logits(out)
+            pred = torch.argmax(out, dim=2)[:,-1:]
+
             preds = torch.cat((preds, pred), dim=1)
-"""
+
+            # if prediction is termination, remove it from preds
+            terminated = torch.any(torch.cat([pred==i for i in eos_tokens], dim=1), dim=1)
+            where = torch.zeros(results.size(0)).bool().to(results.device)
+            where[torch.all(results==0, dim=1)] = terminated
+            results[where, :preds.size(1)] = preds[terminated].clone()
+
+            preds = preds[~terminated]
+            sp = sp[~terminated]
+            x = x[~terminated]
+            lengths_x = lengths_x[~terminated]
+            length_mask_x = LengthMask(lengths_x, max_len, x.device)
+
+            if preds.size(0)==0:
+                break
+
+        return results
+
+    def beam_search(self, x_e, x, sp, max_len, k, eos_tokens=[]):
+        # this is inference
+        self.eval()
+        # mask
+        lengths_x = torch.sum(x>0, dim=1)
+        length_mask_x = LengthMask(lengths_x, max_len, x.device)
+        # generate
+        x = self.x_embedding(x)
+
+        if self.pretrain:
+            x = self.change_dim(x_e)
+            sp = self.species_embedding(sp)
+        else:
+            sp = self.species_embedding(sp)
+
+        x = self.positional_encoding(x)
+
+        # predict k start codons per sequence
+        # first prediction
+        sp = self.positional_encoding(sp)
+        memory = self.encoder(x, length_mask = length_mask_x)
+        # decode
+        out = self.decoder(sp, memory, memory_length_mask = length_mask_x)
+        out = self.to_logits(out)
+        log_lik, preds = torch.topk(F.log_softmax(out[:,-1], dim=1), k)
+        preds = preds.view(-1, 1)
+        scores = log_lik.view(-1, 1)
+
+        # downstream prediction
+        for i in range(1, max_len):
+            y = torch.cat((torch.repeat_interleave(sp, k, 0), self.y_embedding(preds)), dim=1)
+            y = self.positional_encoding(y)
+            length_mask_x = LengthMask(torch.repeat_interleave(lengths_x, k), max_len, x.device)
+
+            memory = self.encoder(torch.repeat_interleave(x, k, 0), length_mask = length_mask_x)
+            # decode
+            out = self.decoder(y, memory, memory_length_mask = length_mask_x)
+            out = self.to_logits(out)
+            log_lik, cands = torch.topk(F.log_softmax(out[:,-1], dim=1), k)
+            log_lik = (log_lik + scores.expand(-1, k) * i) / (i+1)
+            # if terminated, score no longer changes and predictions are set to padding token
+            terminated = torch.any(torch.cat([preds==i for i in eos_tokens], dim=1), dim=1)
+            log_lik[terminated] = scores.expand(-1, k)[terminated].clone()
+            cands[terminated] = 0
+            # if all sequences terminated, then get out of the loop
+            if torch.all(terminated).item():
+                break
+
+            cands = cands.view(-1, k)
+            scores, pred = torch.topk(log_lik.view(-1, k*k), k)
+            pred = pred.view(-1, 1)
+            scores = scores.view(-1, 1)
+
+            origin = pred.squeeze() // k + torch.arange(0, x.size(0)*k).to(x.device) // k * k
+
+            preds = torch.cat((preds[origin], cands[origin, (pred%k).squeeze()].unsqueeze(1)), dim=1)
+
+        return preds
+
+
 # Autoregressive Converter
 class AutoregressiveConverter(nn.Module):
     def __init__(self, n_tokens, seq_len, n_layers, n_heads, query_dimensions, value_dimensions, feed_forward_dimensions, attention_type,\
@@ -235,9 +333,15 @@ class AutoregressiveConverter(nn.Module):
         self.to_logits = nn.Linear(dim, n_tokens)
 
         if pretrain:
+            self.change_dim = nn.Linear(512, dim)
+
+        """
+        if pretrain:
             self.register_buffer("species_embedding", kwargs["species_embedding"])
         else:
             self.species_embedding = nn.Embedding(n_species, dim)
+        """
+        self.species_embedding = nn.Embedding(n_species, dim)
 
         self.pretrain = pretrain
 
@@ -247,13 +351,13 @@ class AutoregressiveConverter(nn.Module):
         y_mask = self.transformer.generate_square_subsequent_mask(y.size(1)).to(y.device)
         
         x = self.x_embedding(x)
-        x = self.positional_encoding(x)
-
         if self.pretrain:
-            x = x + x_e
-            sp = self.species_embedding[sp]
+            x = self.change_dim(x_e)
+            sp = self.species_embedding(sp)
         else:
             sp = self.species_embedding(sp)
+
+        x = self.positional_encoding(x)
 
         y = self.y_embedding(y)
         # start token is species token
@@ -270,6 +374,16 @@ class AutoregressiveConverter(nn.Module):
         out = self.to_logits(out)
 
         return out.permute(1,0,2)
+
+    def freeze(self):
+        for param in self.parameters():
+            param.requires_grad = False
+
+        for param in self.to_logits.parameters():
+            param.requires_grad = True
+
+        for param in self.transformer.decoder.parameters():
+            param.requires_grad = True
 
     def infer_greedily(self, x_e, x, sp, max_len, eos_tokens=[]):
         # this is inference
@@ -334,13 +448,14 @@ class AutoregressiveConverter(nn.Module):
         x_length_mask = x == 0
         # generate
         x = self.x_embedding(x)
-        x = self.positional_encoding(x)
 
         if self.pretrain:
-            x = x + x_e
-            sp = self.species_embedding[sp]
+            x = self.change_dim(x_e)
+            sp = self.species_embedding(sp)
         else:
             sp = self.species_embedding(sp)
+
+        x = self.positional_encoding(x)
 
         # predict k start codons per sequence
         # first prediction
@@ -357,12 +472,12 @@ class AutoregressiveConverter(nn.Module):
 
         # downstream prediction
         for i in range(1, max_len):
-            y = torch.cat((sp.repeat(k, 1, 1), self.y_embedding(preds)), dim=1)
+            y = torch.cat((torch.repeat_interleave(sp, k, 0), self.y_embedding(preds)), dim=1)
             y = self.positional_encoding(y)
             out = self.transformer(
-                x.permute(1,0,2).repeat(1, k, 1),
+                torch.repeat_interleave(x.permute(1,0,2), k, 1),
                 y.permute(1,0,2),
-                src_key_padding_mask=x_length_mask.repeat(k, 1)
+                src_key_padding_mask=torch.repeat_interleave(x_length_mask, k, 0)
             )
             out = self.to_logits(out).permute(1,0,2)
             log_lik, cands = torch.topk(F.log_softmax(out[:,-1], dim=1), k)
@@ -382,11 +497,75 @@ class AutoregressiveConverter(nn.Module):
 
             origin = pred.squeeze() // k + torch.arange(0, x.size(0)*k).to(x.device) // k * k
 
-            preds = torch.cat((preds[origin], cands[torch.arange(x.size(0)*k).to(x.device), (pred%k).squeeze()].unsqueeze(1)), dim=1)
+            preds = torch.cat((preds[origin], cands[origin, (pred%k).squeeze()].unsqueeze(1)), dim=1)
 
         return preds
 
 # for pretrain
+# Transformer based Architecture
+class TransformerEncoder(nn.Module):
+    def __init__(self, n_tokens, seq_len, n_layers, n_heads, query_dimensions, value_dimensions, feed_forward_dimensions,\
+            attention_type, n_species
+        ):
+        super(TransformerEncoder, self).__init__()
+
+        self.layers = TransformerEncoderBuilder.from_kwargs(
+            n_layers = n_layers,
+            n_heads = n_heads,
+            query_dimensions = query_dimensions,
+            value_dimensions = value_dimensions,
+            feed_forward_dimensions = feed_forward_dimensions,
+            attention_type = attention_type
+        ).get()
+
+        dim = n_heads*query_dimensions
+        self.positional_encoding = PositionalEncoding(dim, seq_len)
+        self.codon_embedding = nn.Embedding(n_tokens, dim)
+        self.to_logits = nn.Linear(dim, n_tokens)
+
+        self.species_embedding = nn.Embedding(n_species, dim)
+
+    def forward(self, x, sp):
+        length_mask = LengthMask(torch.sum(x>0, dim=1), 700)
+        x = self.codon_embedding(x)
+        x = self.positional_encoding(x)
+        x = x + self.species_embedding(sp)
+        x = self.layers(x, length_mask=length_mask)
+        
+        return self.to_logits(x)
+
+from linformer import Linformer
+# Linear Transformer
+class LinformerLM(nn.Module):
+    def __init__(self, n_tokens, n_species, dim, seq_len, depth, k = 256, heads = 8,\
+        dim_head = None, one_kv_head = False, share_kv = False, reversible = False, dropout = 0.):
+        super(LinformerLM, self).__init__()
+
+        self.layers = Linformer(
+            dim = dim,
+            seq_len = seq_len,
+            depth = depth,
+            heads = heads,
+            dim_head = dim_head,
+            k = k,
+            one_kv_head = one_kv_head,
+            share_kv = share_kv,
+            reversible = reversible,
+            dropout = dropout
+        )
+        self.positional_encoding = PositionalEncoding(dim, seq_len)
+        self.codon_embedding = nn.Embedding(n_tokens, dim)
+        self.to_logits = nn.Linear(dim, n_tokens)
+        self.to_species = nn.Linear(dim, n_species)
+
+    def forward(self, x):
+        x = self.codon_embedding(x)
+        x = self.positional_encoding(x)
+        x = self.layers(x)
+        
+        return self.to_logits(x), self.to_species(x[:,0])
+
+# gMLP based Architecture
 class SPgMLP(gMLP):
     def __init__(
         self,
@@ -424,13 +603,11 @@ class SPgMLP(gMLP):
 
     def get_output(self, x, label):
         x = self.to_embed(x) + self.species_embedding(label)
-        layers = self.layers if not self.training else dropout_layers(self.layers, self.prob_survival)
-        out = nn.Sequential(*layers)(x)
+        out = nn.Sequential(*self.layers)(x)
 
         return out
 
-    def forward(self, x, label):
-        x = self.to_embed(x) + self.species_embedding(label)
-        layers = self.layers if not self.training else dropout_layers(self.layers, self.prob_survival)
-        out = nn.Sequential(*layers)(x)
+    def forward(self, x, sp):
+        x = self.to_embed(x) + self.species_embedding(sp)
+        out = nn.Sequential(*self.layers)(x)
         return self.to_logits(out)
