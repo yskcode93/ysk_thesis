@@ -19,7 +19,7 @@ from .file import GeneBatchLoader, sanitize, vocab, write_fna_faa
 from .database import fetchall
 
 # train test split
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, StratifiedKFold
 
 # base package
 import re
@@ -216,6 +216,278 @@ def cross_validate(gpu, world_size, ConverterClass, config, weight_path, n_epoch
 
                 torch.save(checkpoint, "{}/weight/checkpoint_{}_{}.pt".format(output_dir, fold_idx+1, i))
 
+def cross_validate_(gpu, world_size, ConverterClass, config, weight_path, n_epochs, batch_size, lr, warmup, use_apex, finetune,\
+        strain_ids, run_ids, direction, mode,\
+        pretrain, PretrainClass, config_pretrain, pretrain_path,\
+        log_interval=1, save_interval=1, output_dir="./Result", random_state=0\
+    ):
+    # rank equals gpu when using one node only
+    rank = gpu
+    # create default process group
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    # create local model
+    torch.manual_seed(0)
+    torch.cuda.set_device(gpu)
+
+    max_length = 701 if pretrain and "n_species" in config_pretrain else 700
+
+    # pretrain model
+    if pretrain:
+        model_pretrain = PretrainClass(**config_pretrain).to(gpu)
+        dist.barrier()
+        map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+        pt = torch.load(pretrain_path, map_location=map_location)
+        model_pretrain.load_state_dict(pt["model"])
+        model_pretrain.eval()
+
+    dist.barrier()
+    map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+    data = torch.load("./protein_family_paired.pt", map_location=map_location)
+    X = data["X"]
+    Y = data["Y"]
+
+    # cross validation
+    kf = KFold(random_state=random_state, shuffle=True)
+    
+    for fold_idx, (train_idx, test_idx) in enumerate(kf.split(X)):
+        # write only source and target
+        write_fna_faa(X[test_idx, 1:] if pretrain and "n_species" in config_pretrain else X[test_idx], "{}/finetune/src_{}".format(output_dir, fold_idx+1), "SRC")
+        write_fna_faa(Y[test_idx, 1:] if pretrain and "n_species" in config_pretrain else Y[test_idx], "{}/finetune/tgt_{}".format(output_dir, fold_idx+1), "TGT")
+
+        dataset = dat.TensorDataset(X[train_idx], Y[train_idx], torch.zeros(len(train_idx), 1).long())
+
+        # load pretrained converter
+        model = ConverterClass(**config).to(gpu)
+        if finetune:
+            dist.barrier()
+            map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+            pt = torch.load(weight_path, map_location=map_location)
+            model.load_state_dict(pt["model"])
+            model.freeze()
+
+        optimizer = opt.AdamW(model.parameters())
+        criterion = nn.CrossEntropyLoss()
+
+        if use_apex:
+            model, optimizer = amp.initialize(model, optimizer, opt_level='O2')
+
+        model = DDP_APEX(model) if use_apex else DDP(model, device_ids=[gpu], find_unused_parameters=True)
+        # loader
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=world_size,
+            rank=rank
+        )
+        loader = dat.DataLoader(
+            dataset=dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=True,
+            sampler=sampler
+        )
+
+        # scheduler
+        scheduler = lrs.OneCycleLR(
+            optimizer,
+            lr,
+            epochs = n_epochs,
+            steps_per_epoch = len(loader),
+            pct_start=warmup,
+            anneal_strategy='linear'
+        )
+
+        for i in range(1, n_epochs+1):
+            start = time.time()
+
+            sampler.set_epoch(i)
+
+            avg_loss = 0
+
+            for x, y, y_sp in loader:
+                optimizer.zero_grad()
+                x, y, y_sp = x.cuda(non_blocking=True), y.cuda(non_blocking=True), y_sp.cuda(non_blocking=True)
+
+                if pretrain:
+                    with torch.no_grad():
+                        x_e = model_pretrain.get_output(x)
+
+                    out = model(x_e, x[:,1:], y_sp, y[:,1:]) if pretrain and "n_species" in config_pretrain else model(x_e, x, y_sp, y)
+                else:
+                    out = model(x, x, y_sp, y)
+
+                loss = criterion(out.permute(0,2,1), y[:, 1:] if pretrain and "n_species" in config_pretrain else y)
+                if use_apex:
+                    with amp.scale_loss(loss, optimizer) as scaled_loss:
+                        scaled_loss.backward()
+                else:
+                    loss.backward()
+
+                # prevent gradient explosion
+                utils.clip_grad_norm_(model.parameters(), 1)
+
+                avg_loss += loss.item()
+
+                optimizer.step()
+                scheduler.step()
+
+            avg_loss /= len(loader)
+
+            if rank == 0 and i%log_interval==0:
+                with open("{}/finetune.log".format(output_dir), "a") as f:
+                    f.write("FOLD {} EPOCH({:0=3}%) LOSS: {:.4f} lr={:.4f} x 1e-4 ELAPSED TIME: {:.4f}s\n".format(fold_idx+1, int(i*100/n_epochs), avg_loss,\
+                        scheduler.get_last_lr()[0]*1e4, time.time()-start))
+
+            if rank == 0 and (i==0 or i%save_interval==0):
+                checkpoint = {
+                    'model': model.module.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'amp': amp.state_dict(),
+                    'scheduler': scheduler.state_dict()
+                } if use_apex else {
+                    'model': model.module.state_dict(),
+                    'scheduler': scheduler.state_dict()
+                }
+
+                torch.save(checkpoint, "{}/weight/checkpoint_{}_{}.pt".format(output_dir, fold_idx+1, i))
+
+def cross_validate_stratified(gpu, world_size, ConverterClass, config, weight_path, n_epochs, batch_size, lr, warmup, use_apex, finetune,\
+        strain_ids, run_ids, direction, mode,\
+        pretrain, PretrainClass, config_pretrain, pretrain_path,\
+        log_interval=1, save_interval=1, output_dir="./Result", random_state=0\
+    ):
+    # rank equals gpu when using one node only
+    rank = gpu
+    # create default process group
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    # create local model
+    torch.manual_seed(0)
+    torch.cuda.set_device(gpu)
+
+    max_length = 701 if pretrain and "n_species" in config_pretrain else 700
+
+    # pretrain model
+    if pretrain:
+        model_pretrain = PretrainClass(**config_pretrain).to(gpu)
+        dist.barrier()
+        map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+        pt = torch.load(pretrain_path, map_location=map_location)
+        model_pretrain.load_state_dict(pt["model"])
+        model_pretrain.eval()
+
+    dist.barrier()
+    map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+    data = torch.load("./protein_family_paired_.pt", map_location=map_location)
+    X = data["X"]
+    Y = data["Y"]
+    label_X = data["label_X"]
+    label_Y = data["label_Y"]
+
+    # cross validation
+    kf = StratifiedKFold(random_state=random_state, shuffle=True, n_splits=2)
+    
+    for fold_idx, (train_idx, test_idx) in enumerate(kf.split(X, label_X)):
+        # write only source and target
+        write_fna_faa(X[test_idx, 1:] if pretrain and "n_species" in config_pretrain else X[test_idx], "{}/finetune/src_{}".format(output_dir, fold_idx+1), "SRC")
+        write_fna_faa(Y[test_idx, 1:] if pretrain and "n_species" in config_pretrain else Y[test_idx], "{}/finetune/tgt_{}".format(output_dir, fold_idx+1), "TGT")
+
+        dataset = dat.TensorDataset(X[train_idx], Y[train_idx], torch.zeros(len(train_idx), 1).long())
+
+        # load pretrained converter
+        model = ConverterClass(**config).to(gpu)
+        if finetune:
+            dist.barrier()
+            map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+            pt = torch.load(weight_path, map_location=map_location)
+            model.load_state_dict(pt["model"])
+            model.freeze()
+
+        optimizer = opt.AdamW(model.parameters())
+        criterion = nn.CrossEntropyLoss()
+
+        if use_apex:
+            model, optimizer = amp.initialize(model, optimizer, opt_level='O2')
+
+        model = DDP_APEX(model) if use_apex else DDP(model, device_ids=[gpu], find_unused_parameters=True)
+        # loader
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=world_size,
+            rank=rank
+        )
+        loader = dat.DataLoader(
+            dataset=dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=True,
+            sampler=sampler
+        )
+
+        # scheduler
+        scheduler = lrs.OneCycleLR(
+            optimizer,
+            lr,
+            epochs = n_epochs,
+            steps_per_epoch = len(loader),
+            pct_start=warmup,
+            anneal_strategy='linear'
+        )
+
+        for i in range(1, n_epochs+1):
+            start = time.time()
+
+            sampler.set_epoch(i)
+
+            avg_loss = 0
+
+            for x, y, y_sp in loader:
+                optimizer.zero_grad()
+                x, y, y_sp = x.cuda(non_blocking=True), y.cuda(non_blocking=True), y_sp.cuda(non_blocking=True)
+
+                if pretrain:
+                    with torch.no_grad():
+                        x_e = model_pretrain.get_output(x)
+
+                    out = model(x_e, x[:,1:], y_sp, y[:,1:]) if pretrain and "n_species" in config_pretrain else model(x_e, x, y_sp, y)
+                else:
+                    out = model(x, x, y_sp, y)
+
+                loss = criterion(out.permute(0,2,1), y[:, 1:] if pretrain and "n_species" in config_pretrain else y)
+                if use_apex:
+                    with amp.scale_loss(loss, optimizer) as scaled_loss:
+                        scaled_loss.backward()
+                else:
+                    loss.backward()
+
+                # prevent gradient explosion
+                utils.clip_grad_norm_(model.parameters(), 1)
+
+                avg_loss += loss.item()
+
+                optimizer.step()
+                scheduler.step()
+
+            avg_loss /= len(loader)
+
+            if rank == 0 and i%log_interval==0:
+                with open("{}/finetune.log".format(output_dir), "a") as f:
+                    f.write("FOLD {} EPOCH({:0=3}%) LOSS: {:.4f} lr={:.4f} x 1e-4 ELAPSED TIME: {:.4f}s\n".format(fold_idx+1, int(i*100/n_epochs), avg_loss,\
+                        scheduler.get_last_lr()[0]*1e4, time.time()-start))
+
+            if rank == 0 and (i==0 or i%save_interval==0):
+                checkpoint = {
+                    'model': model.module.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'amp': amp.state_dict(),
+                    'scheduler': scheduler.state_dict()
+                } if use_apex else {
+                    'model': model.module.state_dict(),
+                    'scheduler': scheduler.state_dict()
+                }
+
+                torch.save(checkpoint, "{}/weight/checkpoint_{}_{}.pt".format(output_dir, fold_idx+1, i))
+
 def test_from_fasta(ConverterClass, config, strain_ids, sp, n_epochs, n_folds, mode, device,\
     pretrain, PretrainClass, config_pretrain, pretrain_path,\
     output_dir="./Result", batch_size=100):
@@ -237,7 +509,7 @@ def test_from_fasta(ConverterClass, config, strain_ids, sp, n_epochs, n_folds, m
 
         X, Y_sp = X.to(device), Y_sp.to(device)
         # converter class
-        pt = torch.load("{}/weight/checkpoint_{}.pt".format(output_dir, n_epochs), map_location=lambda storage, loc: storage.cuda(device))
+        pt = torch.load("{}/weight/checkpoint_{}_{}.pt".format(output_dir, i, n_epochs), map_location=lambda storage, loc: storage.cuda(device))
         model = ConverterClass(**config).to(device)
         model.load_state_dict(pt["model"])
         model.eval()

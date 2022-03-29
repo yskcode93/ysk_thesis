@@ -376,6 +376,131 @@ def train_(gpu, world_size, PretrainClass, config, n_epochs, batch_size, lr, war
 
     dist.destroy_process_group()
 
+def train_fam_cls(gpu, world_size, PretrainClass, config, n_epochs, batch_size, lr, warmup, use_apex,\
+    log_interval, save_interval, resume, log="./pretrain.log", checkpoint_path="./checkpoint.pt"):
+    # rank equals gpu when using one node only
+    rank = gpu
+    # create default process group
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    # create local model
+    torch.manual_seed(0)
+    torch.cuda.set_device(gpu)
+
+    # define model
+    model = PretrainClass(**config).to(gpu)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, betas=(0.756, 0.443))
+
+    if use_apex:
+        model, optimizer = amp.initialize(model, optimizer, opt_level='O2')
+
+    if resume:
+        dist.barrier()
+        map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+        chkpt = torch.load(checkpoint_path, map_location=map_location)
+        model.load_state_dict(chkpt["model"])
+
+        if use_apex:
+            amp.load_state_dict(chkpt["amp"])
+            optimizer.load_state_dict(chkpt["optimizer"])
+
+    # construct DDP model
+    ddp_model = DDP_APEX(model) if use_apex else DDP(model, device_ids=[gpu])
+    # define loss function
+    trainer = CLSMLM(
+        ddp_model,
+        mask_token_id = vocab.index("<msk>"),          # the token id reserved for masking
+        pad_token_id = vocab.index("<pad>"),           # the token id for padding
+        mask_prob = 0.15,           # masking probability for masked language modeling
+        replace_prob = 0.90,        # ~10% probability that token will not be masked, but included in loss, as detailed in the epaper
+        num_tokens = 65,
+        random_token_prob = 0.05,
+        mask_ignore_token_ids = [len(vocab)]  # last token is classification token
+    ).cuda()
+
+    if rank==0:
+        with open(log, "w") as f:
+            pass
+
+    dist.barrier()
+    map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+    dataset = torch.load("./protein_family.pt", map_location=map_location)
+
+    dataset = TensorDataset(dataset["X"], dataset["y"])
+
+    sampler = DistributedSampler(
+        dataset,
+        num_replicas=world_size,
+        rank=rank
+    )
+    loader = torch.utils.data.DataLoader(
+        dataset=dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=True,
+        sampler=sampler,
+    )
+
+    """scheduler = OneCycleLR(
+        optimizer,
+        lr,
+        total_steps=n_epochs*len(loader),
+        pct_start=warmup,
+        anneal_strategy='linear'
+    )"""
+
+    for i in range(1, n_epochs+1):
+        mlm_loss_avg = 0
+        cls_loss_avg = 0
+
+        # different ordering
+        sampler.set_epoch(i)
+
+        # start time
+        start = time()
+
+        for x, label in loader:
+            x = x.cuda(non_blocking=True)
+            label = label.cuda(non_blocking=True)
+            optimizer.zero_grad()
+            mlm_loss, cls_loss = trainer(x, label)
+            loss = mlm_loss + cls_loss
+
+            if use_apex:
+                with amp.scale_loss(loss, optimizer) as scaled_loss:
+                    scaled_loss.backward()
+            else:
+                loss.backward()
+
+            optimizer.step()
+            #scheduler.step()
+            mlm_loss_avg += mlm_loss.item()
+            cls_loss_avg += cls_loss.item()
+
+        # end time
+        end = time()
+
+        mlm_loss_avg /= len(loader)
+        cls_loss_avg /= len(loader)
+
+        if rank == 0 and i % log_interval == 0:
+            with open(log, "a") as f:
+                f.write("EPOCH({:0=3}%) LOSS: MLM={:.4f}, CLS={:.4f} ELAPSED TIME: {:3.1f}s\n".format(int((i+1)*100/n_epochs), mlm_loss_avg, cls_loss_avg, end-start))
+
+        if rank==0 and i % save_interval == 0:
+            checkpoint = {
+                'model': ddp_model.module.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                #'scheduler': scheduler.state_dict(),
+                'amp': amp.state_dict()
+            } if use_apex else {
+                'model': ddp_model.module.state_dict()
+            }
+
+            torch.save(checkpoint, checkpoint_path)
+
+    dist.destroy_process_group()
+
 def mlm(gpu, world_size, model, vocab, mask_idx, pad_idx, epoch, batch_size, max_length, gbl_config=None, log="./mlm.log", checkpoint_path="./mlm.pt", use_apex=True):
     # rank equals gpu when using one node only
     rank = gpu
