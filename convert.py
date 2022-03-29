@@ -37,6 +37,39 @@ def cross_validate(gpu, world_size, ConverterClass, config, weight_path, n_epoch
         pretrain, PretrainClass, config_pretrain, pretrain_path,\
         log_interval=1, save_interval=1, output_dir="./Result", random_state=0\
     ):
+    """This function conducts k-fold cross validation of seq-to-seq transformer.
+
+    Pass the function to torch.multiprocessing.spawn to start distributed learning on multiple gpus.
+
+    Argument:
+    gpu -- Integer: internal id for each gpu
+    world_size -- Integer: total count of gpus
+    ConverterClass -- Class: custom model class that extends torch.nn.Module
+    config -- Dictionary: arguments of ConverterClass
+    weight_path -- String: Path in which the model weights are saved
+    n_epochs -- Integer: Epoch for training
+    batch_size -- Integer: Batch size on each gpu
+    lr -- Float: maximum learning rate for training
+    warmup -- Float: ratio of warmup epochs compared to 'n_epochs'
+    use_apex -- Boolean: whether or not A Pytorch Extension(apex) is used to get training much faster
+    finetune -- Boolean: whether or not the model weights start from checkpoints provided by 'weight_path'
+    strain_ids -- List(Integer): dummy argument
+    run_ids -- List(Integer): list of run ids that are included to training dataset
+    direction -- Integer{0,1,2}: direction for conversion 0(X->Y,Y->X), 1(X->Y), 2(Y->X)
+    mode -- Integer: dummy argument
+    pretrain -- Boolean: whether or not output feature vectors of the pretrained model are used in training.
+    PretrainClass -- Class: custom model class that extends torch.nn.Module
+    config_pretrain -- Dictionary: arguments of PretrainClass
+    pretrain_path -- String: Path in which the model weights are saved
+    log_interval -- Integer: training is logged once in 'log_interval' epochs
+    save_interval -- Ineger: the model weights are saved to 'weight_path' once in 'save_interval'
+    output_dir -- String: directory for saving results. This directory should have two child directories, ./finetune and ./weights.
+    random_state -- Integer: seed value for spliting dataset.
+
+    Return:
+    None
+    """
+
     # rank equals gpu when using one node only
     rank = gpu
     # create default process group
@@ -491,6 +524,28 @@ def cross_validate_stratified(gpu, world_size, ConverterClass, config, weight_pa
 def test_from_fasta(ConverterClass, config, strain_ids, sp, n_epochs, n_folds, mode, device,\
     pretrain, PretrainClass, config_pretrain, pretrain_path,\
     output_dir="./Result", batch_size=100):
+    """This function generates sequences from source sequences in "{output_dir}/finetune" by greedy search or beam search
+
+    Argument:
+    ConverterClass -- Class: custom model class that extends torch.nn.Module
+    config -- Dictionary: arguments of ConverterClass
+    strain_ids -- List(Integer): list of internal ids for strains.
+    sp -- Integer: internal id of the target strain(Y)
+    n_epochs -- Integer: the model weights saved in "checkpoint_{}_{n_epochs}" are used for inference.
+    n_folds -- Integer: the number of folds in cross validation
+    mode -- Integer{0,1}: inference mode, 0 for greedy search, 1 for beam search
+    device -- Integer: which gpu is used for inference
+    pretrain -- Boolean: whether or not output feature vectors of the pretrained model are used in training.
+    PretrainClass -- Class: custom model class that extends torch.nn.Module
+    config_pretrain -- Dictionary: arguments of PretrainClass
+    pretrain_path -- String: Path in which the model weights are saved
+    output_dir -- String: directory for saving results. Generated sequences are saved in "{output_dir}/finetune".
+    batch_size -- Integer: batch size for beam search Set smaller value when memory is overflowed.
+
+    Return:
+    None
+    """
+
     for i in tqdm(range(1, n_folds+1)):
         # source sequences
         with open("{}/finetune/src_{}.fna".format(output_dir, i), "r") as f:
@@ -610,14 +665,42 @@ def test(ConverterClass, config, strain_ids, run_ids, direction, n_epochs, n_sam
 
     write_fna_faa(out.cpu(), "{}/test/beam_search/gen_{}".format(output_dir, n_epochs), "GEN")
 
-# This function is only for training
-# direction = {0: both, 1: x -> y, 2: y-> x}
 def train(gpu, world_size, ConverterClass, config, n_epochs, batch_size, lr, warmup, use_apex,\
         strain_ids, gene_batch_size, total_count, direction,\
         pretrain, PretrainClass, config_pretrain, pretrain_path,\
         checkpoint,\
         log_interval=10, save_interval=100, output_dir="./Result"\
     ):
+    """This function trains seq-to-seq transformer with large dataset.
+
+    Pass the function to torch.multiprocessing.spawn to start distributed learning on multiple gpus.
+
+    Argument:
+    gpu -- Integer: internal id for each gpu
+    world_size -- Integer: total count of gpus
+    ConverterClass -- Class: custom model class that extends torch.nn.Module
+    config -- Dictionary: arguments of ConverterClass
+    n_epochs -- Integer: Epoch for training
+    batch_size -- Integer: Batch size on each gpu
+    lr -- Float: maximum learning rate for training
+    warmup -- Float: ratio of warmup epochs compared to 'n_epochs'
+    use_apex -- Boolean: whether or not A Pytorch Extension(apex) is used to get training much faster
+    strain_ids -- List(Integer): dummy argument
+    gene_batch_size -- Integer: subset size when fetching sequences from database
+    total_count -- Integer: total size of dataset
+    direction -- Integer{0,1,2}: direction for conversion 0(X->Y,Y->X), 1(X->Y), 2(Y->X)
+    pretrain -- Boolean: whether or not output feature vectors of the pretrained model are used in training.
+    PretrainClass -- Class: custom model class that extends torch.nn.Module
+    config_pretrain -- Dictionary: arguments of PretrainClass
+    pretrain_path -- String: Path in which the model weights are saved
+    log_interval -- Integer: training is logged once in 'log_interval' epochs
+    save_interval -- Ineger: the model weights are saved to 'weight_path' once in 'save_interval'
+    output_dir -- String: directory for saving results. This directory should have two child directories, ./finetune and ./weights.
+
+    Return:
+    None
+    """
+
     # rank equals gpu when using one node only
     rank = gpu
     # create default process group
