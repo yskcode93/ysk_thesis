@@ -12,7 +12,7 @@ from g_mlp_pytorch import gMLP
 from fast_transformers.builders import TransformerEncoderBuilder, TransformerDecoderBuilder, RecurrentEncoderBuilder, RecurrentDecoderBuilder
 from fast_transformers.masking import LengthMask, TriangularCausalMask
 
-from .file import to_seq, vocab
+from file import to_seq, vocab
 
 # this skips layers with the given probability
 def dropout_layers(layers, prob_survival):
