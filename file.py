@@ -7,7 +7,7 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 # fetch all
-from .database import fetchall
+from database import fetchall
 #from .analysis import translation_map
 
 codons = itertools.product("ATGC", repeat=3)
