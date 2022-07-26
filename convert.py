@@ -14,9 +14,9 @@ from torch.utils.data.distributed import DistributedSampler
 from apex.parallel import DistributedDataParallel as DDP_APEX
 from apex import amp
 # gene batch loader
-from .file import GeneBatchLoader, sanitize, vocab, write_fna_faa
+from file import GeneBatchLoader, sanitize, vocab, write_fna_faa
 # fetch all
-from .database import fetchall
+from database import fetchall
 
 # train test split
 from sklearn.model_selection import KFold, StratifiedKFold
