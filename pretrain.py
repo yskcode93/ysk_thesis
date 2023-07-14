@@ -14,6 +14,19 @@ from apex.parallel import DistributedDataParallel as DDP_APEX
 from apex import amp
 
 import numpy as np
+#書き換え部分↓
+from preprocess import fasta_to_data
+
+import numpy as np
+import glob
+import re
+import os
+
+import math
+from functools import reduce
+from time import time
+
+from mlm_pytorch import MLM
 
 import re
 import math
@@ -22,9 +35,9 @@ from time import time
 
 from mlm_pytorch import MLM
 
-from .file import GeneBatchLoader, sanitize, vocab
+from file import GeneBatchLoader, sanitize, vocab
 
-from .database import fetchall
+from database import fetchall
 
 def prob_mask_like(t, prob):
     return torch.zeros_like(t).float().uniform_(0, 1) < prob
@@ -49,6 +62,309 @@ def get_mask_subset_with_prob(mask, prob):
     new_mask = torch.zeros((batch, seq_len + 1), device=device)
     new_mask.scatter_(-1, sampled_indices, 1)
     return new_mask[:, 1:].bool()
+
+
+
+#事前学習はこの関数を使って行なっている↓
+##
+#
+#
+#
+#
+#pathを変えること！！！！！！！！！！！！！！！！
+#
+#
+#
+#
+##
+def train_fam_cls_align(gpu, world_size, PretrainClass, config, n_epochs, batch_size, lr, warmup, use_apex,\
+    log_interval, save_interval, resume, log="./pretrain.log", checkpoint_path="./checkpoint.pt"):
+    # rank equals gpu when using one node only
+    rank = gpu
+    # create default process group
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    # create local model
+    torch.manual_seed(0)
+    torch.cuda.set_device(gpu)
+
+    # define model
+    model = PretrainClass(**config).to(gpu)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, betas=(0.756, 0.443))
+
+    if use_apex:
+        model, optimizer = amp.initialize(model, optimizer, opt_level='O2')
+
+    if resume:
+        dist.barrier()
+        map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+        chkpt = torch.load(checkpoint_path, map_location=map_location)
+        model.load_state_dict(chkpt["model"])
+
+        if use_apex:
+            amp.load_state_dict(chkpt["amp"])
+            optimizer.load_state_dict(chkpt["optimizer"])
+
+    # construct DDP model
+    ddp_model = DDP_APEX(model) if use_apex else DDP(model, device_ids=[gpu])
+    # define loss function
+    trainer = CLSMLM(
+        ddp_model,
+        mask_token_id = vocab.index("<msk>"),          # the token id reserved for masking
+        pad_token_id = vocab.index("<pad>"),           # the token id for padding
+        mask_prob = 0.15,           # masking probability for masked language modeling
+        replace_prob = 0.90,        # ~10% probability that token will not be masked, but included in loss, as detailed in the epaper
+        num_tokens = 65,
+        random_token_prob = 0,
+        mask_ignore_token_ids = [len(vocab)]  # last token is classification token
+    ).cuda()
+
+    if rank==0:
+        with open(log, "w") as f:
+            pass
+
+    dist.barrier()
+    map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+    
+    #書き換え部分↓
+    thupath = "./CDSdata/30species_dataset/pretrain_30.npy"
+    X = np.load(thupath)
+    y = torch.zeros(142885,1, dtype=torch.int64)
+    X = torch.from_numpy(X.astype(np.int64)).clone()
+    
+    max_length = 701
+    
+    if X.size(1) < max_length:
+        X = torch.cat((X, torch.zeros(X.size(0), max_length-X.size(1)).long()), dim=1)
+
+    dataset = TensorDataset(X, y)
+    #dataset = TensorDataset(dataset["X"], dataset["y"]) 書き換え部分↑
+
+    sampler = DistributedSampler(
+        dataset,
+        num_replicas=world_size,
+        rank=rank
+    )
+    loader = torch.utils.data.DataLoader(
+        dataset=dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=True,
+        sampler=sampler,
+    )
+
+    """scheduler = OneCycleLR(
+        optimizer,
+        lr,
+        total_steps=n_epochs*len(loader),
+        pct_start=warmup,
+        anneal_strategy='linear'
+    )"""
+
+    for i in range(1, n_epochs+1):
+        mlm_loss_avg = 0
+        cls_loss_avg = 0
+
+        # different ordering
+        sampler.set_epoch(i)
+
+        # start time
+        start = time()
+
+        for x, label in loader:
+            x = x.cuda(non_blocking=True)
+            label = label.cuda(non_blocking=True)
+            optimizer.zero_grad()
+            mlm_loss = trainer(x, label)
+            
+            loss = mlm_loss
+
+            if use_apex:
+                with amp.scale_loss(loss, optimizer) as scaled_loss:
+                    scaled_loss.backward()
+            else:
+                loss.backward()
+
+            optimizer.step()
+            #scheduler.step()
+            mlm_loss_avg += mlm_loss.item()
+            #cls_loss_avg += cls_loss.item()
+
+        # end time
+        end = time()
+
+        mlm_loss_avg /= len(loader)
+        #scls_loss_avg /= len(loader)
+
+        if rank == 0 and i % log_interval == 0:
+            with open(log, "a") as f:
+                f.write("EPOCH({:0=3}%) LOSS: MLM={:.4f}, CLS={:.4f} ELAPSED TIME: {:3.1f}s\n".format(int((i+1)*100/n_epochs), mlm_loss_avg, cls_loss_avg, end-start))
+
+        if rank==0 and i % save_interval == 0:
+            checkpoint = {
+                'model': ddp_model.module.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                #'scheduler': scheduler.state_dict(),
+                'amp': amp.state_dict()
+            } if use_apex else {
+                'model': ddp_model.module.state_dict()
+            }
+
+            torch.save(checkpoint, checkpoint_path)
+
+    dist.destroy_process_group()
+
+
+
+def train_fam_cls_2(gpu, world_size, PretrainClass, config, n_epochs, batch_size, lr, warmup, use_apex,\
+    log_interval, save_interval, resume, log="./pretrain.log", checkpoint_path="./checkpoint.pt"):
+    # rank equals gpu when using one node only
+    rank = gpu
+    # create default process group
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    # create local model
+    torch.manual_seed(0)
+    torch.cuda.set_device(gpu)
+
+    # define model
+    model = PretrainClass(**config).to(gpu)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, betas=(0.756, 0.443))
+
+    if use_apex:
+        model, optimizer = amp.initialize(model, optimizer, opt_level='O2')
+
+    if resume:
+        dist.barrier()
+        map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+        chkpt = torch.load(checkpoint_path, map_location=map_location)
+        model.load_state_dict(chkpt["model"])
+
+        if use_apex:
+            amp.load_state_dict(chkpt["amp"])
+            optimizer.load_state_dict(chkpt["optimizer"])
+
+    # construct DDP model
+    ddp_model = DDP_APEX(model) if use_apex else DDP(model, device_ids=[gpu])
+    # define loss function
+    trainer = CLSMLM(
+        ddp_model,
+        mask_token_id = vocab.index("<msk>"),          # the token id reserved for masking
+        pad_token_id = vocab.index("<pad>"),           # the token id for padding
+        mask_prob = 0.15,           # masking probability for masked language modeling
+        replace_prob = 0.90,        # ~10% probability that token will not be masked, but included in loss, as detailed in the epaper
+        num_tokens = 65,
+        random_token_prob = 0,
+        mask_ignore_token_ids = [len(vocab)]  # last token is classification token
+    ).cuda()
+
+    if rank==0:
+        with open(log, "w") as f:
+            pass
+
+    dist.barrier()
+    map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+    
+    #書き換え部分↓
+    #IDs = ['000009045','002119445','000008445','000007825','006742205']
+    #000009045:Bacillus subtilis
+    IDs = ['000009045']
+    #002119445:Bacillus thuringiensis
+    #IDs = ['002119445']
+    path="./CDSdata/subtilis/fna.fna"
+    fastas = glob.glob(path)
+    #print(fastas)
+    X = fasta_to_data(fastas, slen= 700)
+    #y = torch.zeros(6065,1, dtype=torch.int64)
+    y = torch.zeros(4184,1, dtype=torch.int64)
+    #print(X)
+    #dataset = torch.load("./protein_family.pt", map_location=map_location)　書き換え部分↑
+    
+    #書き換え部分↓
+    X.to('cuda:%d' % rank)
+    y.to('cuda:%d' % rank)
+    #path_w = './test_w.txt'
+    #with open(path_w, mode='a') as f:
+    #    f.write("x_shape\n")
+    #    f.write(str(X))
+    #    f.write("\n")
+    #    f.write(str(X.shape))
+    dataset = TensorDataset(X, y)
+    #dataset = TensorDataset(dataset["X"], dataset["y"]) 書き換え部分↑
+
+    sampler = DistributedSampler(
+        dataset,
+        num_replicas=world_size,
+        rank=rank
+    )
+    loader = torch.utils.data.DataLoader(
+        dataset=dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=True,
+        sampler=sampler,
+    )
+
+    """scheduler = OneCycleLR(
+        optimizer,
+        lr,
+        total_steps=n_epochs*len(loader),
+        pct_start=warmup,
+        anneal_strategy='linear'
+    )"""
+
+    for i in range(1, n_epochs+1):
+        mlm_loss_avg = 0
+        cls_loss_avg = 0
+
+        # different ordering
+        sampler.set_epoch(i)
+
+        # start time
+        start = time()
+
+        for x, label in loader:
+            x = x.cuda(non_blocking=True)
+            label = label.cuda(non_blocking=True)
+            optimizer.zero_grad()
+            mlm_loss = trainer(x, label)
+            
+            loss = mlm_loss
+
+            if use_apex:
+                with amp.scale_loss(loss, optimizer) as scaled_loss:
+                    scaled_loss.backward()
+            else:
+                loss.backward()
+
+            optimizer.step()
+            #scheduler.step()
+            mlm_loss_avg += mlm_loss.item()
+            #cls_loss_avg += cls_loss.item()
+
+        # end time
+        end = time()
+
+        mlm_loss_avg /= len(loader)
+        #scls_loss_avg /= len(loader)
+
+        if rank == 0 and i % log_interval == 0:
+            with open(log, "a") as f:
+                f.write("EPOCH({:0=3}%) LOSS: MLM={:.4f}, CLS={:.4f} ELAPSED TIME: {:3.1f}s\n".format(int((i+1)*100/n_epochs), mlm_loss_avg, cls_loss_avg, end-start))
+
+        if rank==0 and i % save_interval == 0:
+            checkpoint = {
+                'model': ddp_model.module.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                #'scheduler': scheduler.state_dict(),
+                'amp': amp.state_dict()
+            } if use_apex else {
+                'model': ddp_model.module.state_dict()
+            }
+
+            torch.save(checkpoint, checkpoint_path)
+
+    dist.destroy_process_group()
 
 class CLSMLM(MLM):
     def forward(self, input, cls_label, **kwargs):
@@ -90,15 +406,15 @@ class CLSMLM(MLM):
         )
 
         # classification loss
-        cls_loss = F.cross_entropy(
-            species, # classification token is first
-            cls_label
-        )
+        #cls_loss = F.cross_entropy(
+        #    species, # classification token is first
+        #    cls_label
+        #)
 
-        return mlm_loss, cls_loss
+        return mlm_loss
 
 def train(gpu, world_size, PretrainClass, config, n_epochs, batch_size, lr, warmup, use_apex,\
-    strain_ids, log_interval, save_interval, resume, log="./pretrain.log", checkpoint_path="./checkpoint.pt"):
+    strain_ids, log_interval, save_interval, resume, log="./Result/pretrain/tmp.log", checkpoint_path="./Result/pretrain/tmp.pt"):
 
     # rank equals gpu when using one node only
     rank = gpu
@@ -379,6 +695,7 @@ def train_(gpu, world_size, PretrainClass, config, n_epochs, batch_size, lr, war
 def train_fam_cls(gpu, world_size, PretrainClass, config, n_epochs, batch_size, lr, warmup, use_apex,\
     log_interval, save_interval, resume, log="./pretrain.log", checkpoint_path="./checkpoint.pt"):
     # rank equals gpu when using one node only
+    print(gpu)
     rank = gpu
     # create default process group
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
@@ -423,7 +740,7 @@ def train_fam_cls(gpu, world_size, PretrainClass, config, n_epochs, batch_size, 
 
     dist.barrier()
     map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
-    dataset = torch.load("./protein_family.pt", map_location=map_location)
+    dataset = torch.load("./Result/pretrain/protein_family.pt", map_location=map_location)
 
     dataset = TensorDataset(dataset["X"], dataset["y"])
 

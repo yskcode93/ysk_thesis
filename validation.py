@@ -26,7 +26,7 @@ from Bio.SeqRecord import SeqRecord
 import numpy as np
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 
-from .analysis import translation_map, alignment, nc_similarity, amino_to_codon, LEVEL_AMINO
+from analysis import translation_map, alignment, nc_similarity, amino_to_codon, LEVEL_AMINO
 
 from base.pretrain import SPgMLP, dropout_layers
 from g_mlp_pytorch import gMLP

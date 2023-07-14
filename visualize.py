@@ -5,7 +5,7 @@ from scipy import stats
 import re
 from tqdm import tqdm
 
-from .analysis import translation_map, alignment, identity, nc_similarity, amino_to_codon, LEVEL_AMINO
+from analysis import translation_map, alignment, identity, nc_similarity, amino_to_codon, LEVEL_AMINO
 
 METRIC_IDENTITY_AA = 0
 METRIC_IDENTITY_NC = 1
@@ -85,8 +85,13 @@ def scatter_plot(src, tgt, gen, out="", metric=METRIC_IDENTITY_AA, weight_path="
     plt.savefig(out)
     plt.clf()
     plt.close()
+    
+    maxlist = []
+    for i in range(len(sts)):
+        if(sts[i]-gts[i]>0.3):
+            maxlist.append(i+1)
 
-    return sts, gts, sgs
+    return sts, gts, sgs, maxlist
 
 def scatter_plot_beam(src, tgt, gen, out="", metric=METRIC_IDENTITY_AA, lowest=0.0, k=5):
     if metric == METRIC_IDENTITY_AA:
@@ -174,3 +179,4 @@ def scatter_plot_beam(src, tgt, gen, out="", metric=METRIC_IDENTITY_AA, lowest=0
     plt.close()
 
     return sts, gts, sgs
+

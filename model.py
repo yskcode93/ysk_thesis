@@ -13,6 +13,649 @@ from fast_transformers.builders import TransformerEncoderBuilder, TransformerDec
 from fast_transformers.masking import LengthMask, TriangularCausalMask
 
 from file import to_seq, vocab
+from model2 import MultigMLP
+
+CUDA_LAUNCH_BLOCKING=1
+
+class Flatten(nn.Module):
+    def forward(self, x):
+        batch_size = x.shape[0]
+        return x.view(batch_size, -1)
+
+    
+class CNN_converter_one(nn.Module):
+    def __init__(self):
+        super(CNN_converter_one, self).__init__()
+        self.layers = nn.Sequential(
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512,1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512,1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 256, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(256),
+            nn.Dropout(0.2),
+            nn.Conv1d(256, 128, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(128),
+            nn.Dropout(0.2),
+            nn.Conv1d(128, 67,1),
+            nn.PReLU(),
+            nn.BatchNorm1d(67)
+            #nn.Linear(512, 66)
+        )
+        
+    def forward(self, x_e, x, sp, y=None):
+        return self.layers(x_e)
+
+    
+class CNN_converter_U(nn.Module):
+    def __init__(self):
+        super(CNN_converter_U, self).__init__()
+        self.layers = nn.Sequential(
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 256, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(256),
+            nn.Dropout(0.2),
+            nn.Conv1d(256, 128, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(128),
+            nn.Dropout(0.2),
+            nn.Conv1d(128, 256, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(256),
+            nn.Dropout(0.2),
+            nn.Conv1d(256, 512, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            #nn.Linear(512, 512)
+        )
+    
+    def forward(self, x_e, x, sp, y=None):
+        return self.layers(x_e)
+
+class CNN_converter_512(nn.Module):
+    def __init__(self):
+        super(CNN_converter_512, self).__init__()
+        self.layers = nn.Sequential(
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512)
+            #nn.Dropout(0.2),
+            #nn.Conv1d(512, 512, 3, padding = 1),
+            #nn.PReLU(),
+            #nn.BatchNorm1d(512),
+            #nn.Dropout(0.2),
+            #nn.Conv1d(512, 512, 3, padding = 1),
+            #nn.PReLU(),
+            #nn.BatchNorm1d(512)
+            #nn.Linear(512, 512)
+        )
+    
+    def forward(self, x_e, x, sp, y=None):
+        return self.layers(x_e)
+    
+class CNN_converter_512_5(nn.Module):
+    def __init__(self):
+        super(CNN_converter_512_5, self).__init__()
+        self.layers = nn.Sequential(
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 5, padding = 2),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 5, padding = 2),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 5, padding = 2),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 5, padding = 2),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 5, padding = 2),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 5, padding = 2),
+            nn.PReLU(),
+            nn.BatchNorm1d(512)
+            #nn.Dropout(0.2),
+            #nn.Conv1d(512, 512, 3, padding = 1),
+            #nn.PReLU(),
+            #nn.BatchNorm1d(512),
+            #nn.Dropout(0.2),
+            #nn.Conv1d(512, 512, 3, padding = 1),
+            #nn.PReLU(),
+            #nn.BatchNorm1d(512)
+            #nn.Linear(512, 512)
+        )
+    
+    def forward(self, x_e, x, sp, y=None):
+        return self.layers(x_e)
+    
+class CNN_converter_512_4lay(nn.Module):
+    def __init__(self):
+        super(CNN_converter_512_4lay, self).__init__()
+        self.layers = nn.Sequential(
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512,1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512,1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512)
+        )
+    
+    def forward(self, x_e, x, sp, y=None):
+        return self.layers(x_e)
+    
+class CNN_converter_512_8lay(nn.Module):
+    def __init__(self):
+        super(CNN_converter_512_8lay, self).__init__()
+        self.layers = nn.Sequential(
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 15, padding = 7),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 15, padding = 7),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 15, padding = 7),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 15, padding = 7),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 15, padding = 7),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 256, 15, padding = 7),
+            nn.PReLU(),
+            nn.BatchNorm1d(256),
+            nn.Dropout(0.2),
+            nn.Conv1d(256, 128, 15, padding = 7),
+            nn.PReLU(),
+            nn.BatchNorm1d(128),
+            nn.Dropout(0.2),
+            nn.Conv1d(128, 67, 15, padding = 7),
+            nn.PReLU(),
+            nn.BatchNorm1d(67)
+        )
+    
+    def forward(self, x_e, x, sp, y=None):
+        return self.layers(x_e)
+    
+class CNN_converter_512_12lay(nn.Module):
+    def __init__(self):
+        super(CNN_converter_512_12lay, self).__init__()
+        self.layers = nn.Sequential(
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 256, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(256),
+            nn.Dropout(0.2),
+            nn.Conv1d(256, 128, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(128),
+            nn.Dropout(0.2),
+            nn.Conv1d(128, 67, 3, padding = 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(67)
+        )
+    
+    def forward(self, x_e, x, sp, y=None):
+        return self.layers(x_e)
+
+class CNN_converter_512_24lay(nn.Module):
+    def __init__(self):
+        super(CNN_converter_512_24lay, self).__init__()
+        self.layers = nn.Sequential(
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512,1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512,1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512,1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512,1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512,1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512,1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512,1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.2),
+            nn.Conv1d(512, 512, 1),
+            nn.PReLU(),
+            nn.BatchNorm1d(512)
+        )
+    
+    def forward(self, x_e, x, sp, y=None):
+        return self.layers(x_e)
+
+# Autoregressive Converter
+class FastAutoregressiveConverter(nn.Module):
+    def __init__(self, n_tokens, seq_len, n_layers, n_heads, query_dimensions, value_dimensions, feed_forward_dimensions, attention_type,\
+            n_species, pretrain = True, **kwargs
+        ):
+        super(FastAutoregressiveConverter, self).__init__()
+
+        self.encoder = TransformerEncoderBuilder.from_kwargs(
+            n_layers = n_layers,
+            n_heads = n_heads,
+            query_dimensions = query_dimensions,
+            value_dimensions = value_dimensions,
+            feed_forward_dimensions = feed_forward_dimensions,
+            attention_type = attention_type
+        ).get()
+        
+        #self.decoder = TransformerDecoderBuilder.from_kwargs(
+            #n_layers = n_layers,
+            #n_heads = n_heads,
+            #query_dimensions = query_dimensions,
+            #value_dimensions = value_dimensions,
+            #feed_forward_dimensions = feed_forward_dimensions,
+            #self_attention_type = attention_type,
+            #cross_attention_type = attention_type
+        #).get()
+        
+        self.premodel = MultigMLP(67,512,1024,701,32,nn.Tanh(),278,)
+        #self.pt = torch.load("./Result/pretrain/protein_family_subtilis_notest.pt")
+        #self.decoder = self.premodel.to(device)
+        #self.premodel.load_state_dict(self.pt["model"])
+
+        dim = n_heads*query_dimensions
+        self.positional_encoding = PositionalEncoding(dim, seq_len)
+        self.x_embedding = nn.Embedding(n_tokens, dim)
+        self.y_embedding = nn.Embedding(n_tokens, dim)
+        self.to_logits = nn.Linear(dim, n_tokens)
+
+        if pretrain:
+            self.change_dim = nn.Linear(512, dim)
+
+        self.species_embedding = nn.Embedding(n_species, dim)
+
+        self.change_dim2 = nn.Linear(dim, 512)
+        
+        self.pretrain = pretrain
+ 
+    def forward(self, x_e, x, sp, y=None):
+        N, max_len = x.size(0), x.size(1)
+        lengths_x = torch.sum(x>0, dim=1)
+        #lengths_y = torch.sum(y>0, dim=1)
+        x = self.x_embedding(x)
+        if self.pretrain:
+            x = self.change_dim(x_e.detach())
+            sp = self.species_embedding(sp)
+        else:
+            sp = self.species_embedding(sp)
+
+        x = self.positional_encoding(x)
+        #y = self.y_embedding(y)
+        # start token is species token
+        #y = torch.cat((sp, y[:, :-1]), dim=1)
+        #y = self.positional_encoding(y)
+
+        # encode source sequences
+        length_mask_x = LengthMask(lengths_x, max_len, x.device)
+        memory = self.encoder(x, length_mask = length_mask_x)
+        
+        memory = self.change_dim2(memory)
+        
+        #out = self.decoder(memory)
+        #decode
+        #causal_mask = TriangularCausalMask(max_len, device = x.device)
+        #length_mask_y = LengthMask(lengths_y, max_len, y.device)
+        #out = self.decoder(y, memory, x_mask = causal_mask, x_length_mask = length_mask_y, memory_length_mask = length_mask_x)
+       
+        return memory
+
+    def infer_greedily(self, x_e, x, sp, max_len, eos_tokens=[]):
+        # this is inference
+        self.eval()
+        # mask
+        lengths_x = torch.sum(x>0, dim=1)
+        length_mask_x = LengthMask(lengths_x, max_len, x.device)
+        # generate
+        x = self.x_embedding(x)
+
+        if self.pretrain:
+            x = self.change_dim(x_e)
+            sp = self.species_embedding(sp)
+        else:
+            sp = self.species_embedding(sp)
+
+        x = self.positional_encoding(x)
+
+        results = torch.zeros(x.size(0), max_len).long().to(x.device)
+
+        # first prediction
+        sp = self.positional_encoding(sp)
+        memory = self.encoder(x, length_mask = length_mask_x)
+        # decode
+        #out = self.decoder(sp, memory, memory_length_mask = length_mask_x)
+        
+        memory = self.change_dim2(memory)
+        
+        out = self.decoder(memory)
+
+        out = self.to_logits(out)
+        preds = torch.argmax(out, dim=2)
+        # downstream prediction
+        for i in range(1, max_len):
+            y = torch.cat((sp, self.y_embedding(preds)), dim=1)
+            y = self.positional_encoding(y)
+            
+            memory = self.encoder(x, length_mask = length_mask_x)
+            # decode
+            
+            memory = self.change_dim2(memory)
+        
+            out = self.decoder(memory)
+            
+            #out = self.decoder(y, memory, memory_length_mask = length_mask_x)
+
+            out = self.to_logits(out)
+            pred = torch.argmax(out, dim=2)[:,-1:]
+
+            preds = torch.cat((preds, pred), dim=1)
+
+            # if prediction is termination, remove it from preds
+            terminated = torch.any(torch.cat([pred==i for i in eos_tokens], dim=1), dim=1)
+            where = torch.zeros(results.size(0)).bool().to(results.device)
+            where[torch.all(results==0, dim=1)] = terminated
+            results[where, :preds.size(1)] = preds[terminated].clone()
+
+            preds = preds[~terminated]
+            sp = sp[~terminated]
+            x = x[~terminated]
+            lengths_x = lengths_x[~terminated]
+            length_mask_x = LengthMask(lengths_x, max_len, x.device)
+
+            if preds.size(0)==0:
+                break
+
+        return results
+
+    def beam_search(self, x_e, x, sp, max_len, k, eos_tokens=[]):
+        # this is inference
+        self.eval()
+        # mask
+        lengths_x = torch.sum(x>0, dim=1)
+        length_mask_x = LengthMask(lengths_x, max_len, x.device)
+
+        # generate
+        x = self.x_embedding(x)
+
+        if self.pretrain:
+            x = self.change_dim(x_e)
+            sp = self.species_embedding(sp)
+        else:
+            sp = self.species_embedding(sp)
+
+        x = self.positional_encoding(x)
+
+        # predict k start codons per sequence
+        # first prediction
+        sp = self.positional_encoding(sp)
+        memory = self.encoder(x, length_mask = length_mask_x)
+        # decode
+        #out = self.decoder(sp, memory, memory_length_mask = length_mask_x)
+        
+        memory = self.change_dim2(memory)
+        
+        out = self.premodel.get_output_decoder(memory)
+        lfc = nn.Linear(67, 66).cuda()
+        out = lfc(out)
+        print("out")
+        print(out.shape)
+        print(out)
+        log_lik, preds = torch.topk(F.log_softmax(out[:,-1], dim=1), k)
+        preds = preds.view(-1, 1)
+        scores = log_lik.view(-1, 1)
+        #print("x")
+        #print(x)
+        #print("--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------")
+        #print("length_mask_x")
+        #print(length_mask_x.shape)
+        #print("--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------")
+        #print("length_x")
+        #print(lengths_x.shape)
+        #print("--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------")
+        #print("max_len")
+        #print(max_len)
+        #print("--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------")
+        #print("k")
+        #print(k)
+        #print("--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------")
+        #y = torch.cat((torch.repeat_interleave(sp, k, 0), self.y_embedding(preds)), dim=1)
+        #y = self.positional_encoding(y)
+        #length_mask_x = LengthMask(torch.repeat_interleave(lengths_x, k, 0), max_len, x.device)
+        #print(length_mask_x.shape)
+        
+        # downstream prediction
+        for i in range(1, max_len):
+            #y = torch.cat((torch.repeat_interleave(sp, k, 0), self.y_embedding(preds)), dim=1)
+            #y = self.positional_encoding(y)
+            length_mask_x = LengthMask(torch.repeat_interleave(lengths_x, k), max_len, x.device)
+
+            memory = self.encoder(torch.repeat_interleave(x, k, 0), length_mask = length_mask_x)
+            # decode
+            #out = self.decoder(y, memory, memory_length_mask = length_mask_x)
+            #out = self.to_logits(out)
+            memory = self.change_dim2(memory)
+            out = self.premodel.get_output_decoder(memory)
+            lfc = nn.Linear(67, 66).cuda()
+            out = lfc(out)
+            log_lik, cands = torch.topk(F.log_softmax(out[:,-1], dim=1), k)
+            log_lik = (log_lik + scores.expand(-1, k) * i) / (i+1)
+            # if terminated, score no longer changes and predictions are set to padding token
+            terminated = torch.any(torch.cat([preds==i for i in eos_tokens], dim=1), dim=1)
+            log_lik[terminated] = scores.expand(-1, k)[terminated].clone()
+            cands[terminated] = 0
+            # if all sequences terminated, then get out of the loop
+            if torch.all(terminated).item():
+                break
+
+            cands = cands.view(-1, k)
+            scores, pred = torch.topk(log_lik.view(-1, k*k), k)
+            pred = pred.view(-1, 1)
+            scores = scores.view(-1, 1)
+
+            origin = pred.squeeze() // k + torch.arange(0, x.size(0)*k).to(x.device) // k * k
+
+            preds = torch.cat((preds[origin], cands[origin, (pred%k).squeeze()].unsqueeze(1)), dim=1)
+
+        print(preds)
+        return preds
+
 
 # this skips layers with the given probability
 def dropout_layers(layers, prob_survival):
@@ -125,190 +768,6 @@ class TransformerConverter(nn.Module):
         x = self.layers(x)
         
         return self.to_logits(x)[:, 1:] # discard first
-
-# Autoregressive Converter
-class FastAutoregressiveConverter(nn.Module):
-    def __init__(self, n_tokens, seq_len, n_layers, n_heads, query_dimensions, value_dimensions, feed_forward_dimensions, attention_type,\
-            n_species, pretrain = True, **kwargs
-        ):
-        super(FastAutoregressiveConverter, self).__init__()
-
-        self.encoder = TransformerEncoderBuilder.from_kwargs(
-            n_layers = n_layers,
-            n_heads = n_heads,
-            query_dimensions = query_dimensions,
-            value_dimensions = value_dimensions,
-            feed_forward_dimensions = feed_forward_dimensions,
-            attention_type = attention_type
-        ).get()
-
-        self.decoder = TransformerDecoderBuilder.from_kwargs(
-            n_layers = n_layers,
-            n_heads = n_heads,
-            query_dimensions = query_dimensions,
-            value_dimensions = value_dimensions,
-            feed_forward_dimensions = feed_forward_dimensions,
-            self_attention_type = attention_type,
-            cross_attention_type = attention_type
-        ).get()
-
-        dim = n_heads*query_dimensions
-        self.positional_encoding = PositionalEncoding(dim, seq_len)
-        self.x_embedding = nn.Embedding(n_tokens, dim)
-        self.y_embedding = nn.Embedding(n_tokens, dim)
-        self.to_logits = nn.Linear(dim, n_tokens)
-
-        if pretrain:
-            self.change_dim = nn.Linear(512, dim)
-
-        self.species_embedding = nn.Embedding(n_species, dim)
-
-        self.pretrain = pretrain
-
-    def forward(self, x_e, x, sp, y=None):
-        N, max_len = x.size(0), x.size(1)
-        lengths_x = torch.sum(x>0, dim=1)
-        lengths_y = torch.sum(y>0, dim=1)
-        x = self.x_embedding(x)
-        if self.pretrain:
-            x = self.change_dim(x_e.detach())
-            sp = self.species_embedding(sp)
-        else:
-            sp = self.species_embedding(sp)
-
-        x = self.positional_encoding(x)
-        y = self.y_embedding(y)
-        # start token is species token
-        y = torch.cat((sp, y[:, :-1]), dim=1)
-        y = self.positional_encoding(y)
-
-        # encode source sequences
-        length_mask_x = LengthMask(lengths_x, max_len, x.device)
-        memory = self.encoder(x, length_mask = length_mask_x)
-        # decode
-        causal_mask = TriangularCausalMask(max_len, device = x.device)
-        length_mask_y = LengthMask(lengths_y, max_len, y.device)
-        out = self.decoder(y, memory, x_mask = causal_mask, x_length_mask = length_mask_y, memory_length_mask = length_mask_x)
-        
-        return self.to_logits(out)
-
-    def infer_greedily(self, x_e, x, sp, max_len, eos_tokens=[]):
-        # this is inference
-        self.eval()
-        # mask
-        lengths_x = torch.sum(x>0, dim=1)
-        length_mask_x = LengthMask(lengths_x, max_len, x.device)
-        # generate
-        x = self.x_embedding(x)
-
-        if self.pretrain:
-            x = self.change_dim(x_e)
-            sp = self.species_embedding(sp)
-        else:
-            sp = self.species_embedding(sp)
-
-        x = self.positional_encoding(x)
-
-        results = torch.zeros(x.size(0), max_len).long().to(x.device)
-
-        # first prediction
-        sp = self.positional_encoding(sp)
-        memory = self.encoder(x, length_mask = length_mask_x)
-        # decode
-        out = self.decoder(sp, memory, memory_length_mask = length_mask_x)
-
-        out = self.to_logits(out)
-        preds = torch.argmax(out, dim=2)
-        # downstream prediction
-        for i in range(1, max_len):
-            y = torch.cat((sp, self.y_embedding(preds)), dim=1)
-            y = self.positional_encoding(y)
-            
-            memory = self.encoder(x, length_mask = length_mask_x)
-            # decode
-            out = self.decoder(y, memory, memory_length_mask = length_mask_x)
-
-            out = self.to_logits(out)
-            pred = torch.argmax(out, dim=2)[:,-1:]
-
-            preds = torch.cat((preds, pred), dim=1)
-
-            # if prediction is termination, remove it from preds
-            terminated = torch.any(torch.cat([pred==i for i in eos_tokens], dim=1), dim=1)
-            where = torch.zeros(results.size(0)).bool().to(results.device)
-            where[torch.all(results==0, dim=1)] = terminated
-            results[where, :preds.size(1)] = preds[terminated].clone()
-
-            preds = preds[~terminated]
-            sp = sp[~terminated]
-            x = x[~terminated]
-            lengths_x = lengths_x[~terminated]
-            length_mask_x = LengthMask(lengths_x, max_len, x.device)
-
-            if preds.size(0)==0:
-                break
-
-        return results
-
-    def beam_search(self, x_e, x, sp, max_len, k, eos_tokens=[]):
-        # this is inference
-        self.eval()
-        # mask
-        lengths_x = torch.sum(x>0, dim=1)
-        length_mask_x = LengthMask(lengths_x, max_len, x.device)
-        # generate
-        x = self.x_embedding(x)
-
-        if self.pretrain:
-            x = self.change_dim(x_e)
-            sp = self.species_embedding(sp)
-        else:
-            sp = self.species_embedding(sp)
-
-        x = self.positional_encoding(x)
-
-        # predict k start codons per sequence
-        # first prediction
-        sp = self.positional_encoding(sp)
-        memory = self.encoder(x, length_mask = length_mask_x)
-        # decode
-        out = self.decoder(sp, memory, memory_length_mask = length_mask_x)
-        out = self.to_logits(out)
-        log_lik, preds = torch.topk(F.log_softmax(out[:,-1], dim=1), k)
-        preds = preds.view(-1, 1)
-        scores = log_lik.view(-1, 1)
-
-        # downstream prediction
-        for i in range(1, max_len):
-            y = torch.cat((torch.repeat_interleave(sp, k, 0), self.y_embedding(preds)), dim=1)
-            y = self.positional_encoding(y)
-            length_mask_x = LengthMask(torch.repeat_interleave(lengths_x, k), max_len, x.device)
-
-            memory = self.encoder(torch.repeat_interleave(x, k, 0), length_mask = length_mask_x)
-            # decode
-            out = self.decoder(y, memory, memory_length_mask = length_mask_x)
-            out = self.to_logits(out)
-            log_lik, cands = torch.topk(F.log_softmax(out[:,-1], dim=1), k)
-            log_lik = (log_lik + scores.expand(-1, k) * i) / (i+1)
-            # if terminated, score no longer changes and predictions are set to padding token
-            terminated = torch.any(torch.cat([preds==i for i in eos_tokens], dim=1), dim=1)
-            log_lik[terminated] = scores.expand(-1, k)[terminated].clone()
-            cands[terminated] = 0
-            # if all sequences terminated, then get out of the loop
-            if torch.all(terminated).item():
-                break
-
-            cands = cands.view(-1, k)
-            scores, pred = torch.topk(log_lik.view(-1, k*k), k)
-            pred = pred.view(-1, 1)
-            scores = scores.view(-1, 1)
-
-            origin = pred.squeeze() // k + torch.arange(0, x.size(0)*k).to(x.device) // k * k
-
-            preds = torch.cat((preds[origin], cands[origin, (pred%k).squeeze()].unsqueeze(1)), dim=1)
-
-        return preds
-
 
 # Autoregressive Converter
 class AutoregressiveConverter(nn.Module):

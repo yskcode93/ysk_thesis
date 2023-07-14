@@ -9,7 +9,7 @@ import subprocess
 import time
 from tqdm import tqdm
 
-from .hmmer import sequence_search, check, retrieve_result
+from hmmer import sequence_search, check, retrieve_result
 
 # translation mapping
 translation_map = {
@@ -32,7 +32,15 @@ translation_map = {
     "CGT": "R", "CGC": "R", "CGA": "R", "CGG": "R", "AGA": "R", "AGG": "R",
     "GGT": "G", "GGC": "G", "GGA": "G", "GGG": "G",
     "ATG": "M",
-    "TGG": "W"
+    "TGG": "W",
+    
+    "TAA":'*','TAG':'*','TGA':'*'
+    #こいつらが何番目かを数える
+    #平谷のデータはACGTの順だから、その中でTAA TAG TGAの番号を求めて　17,19, 25と入れ替える
+}
+
+start_map = {
+  "TTG": "M", "CTG": "M", "ATT": "M", "ATC": "M", "ATA": "M", "ATG": "M", "GTG": "M"
 }
 
 # calculate GC Content

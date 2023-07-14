@@ -186,3 +186,21 @@ class MultigMLP(nn.Module):
         #x = self.to_logits[0](x)
         #x = x.masked_fill(mask.unsqueeze(2).repeat(1,1,x.size(2)), 0)
         return x[:,1:]
+    def get_output_decoder(self, x):
+        #mask = x == 0
+        #x = self.embedding(x)
+        #x = self.layers(x)
+        #x = self.to_logits[0](x)
+        x = self.to_logits(x)
+        #x = x.masked_fill(mask.unsqueeze(2).repeat(1,1,x.size(2)), 0)
+        #return x[:,1:]
+        return x
+    def get_output_decoder_2(self, x):
+        #mask = x == 0
+        x = self.embedding(x)
+        x = self.layers(x)
+        #x = self.to_logits[0](x)
+        x = self.to_logits(x)
+        #x = x.masked_fill(mask.unsqueeze(2).repeat(1,1,x.size(2)), 0)
+        #return x[:,1:]
+        return x

@@ -10,9 +10,38 @@ from Bio.SeqRecord import SeqRecord
 from database import fetchall
 #from .analysis import translation_map
 
-codons = itertools.product("ATGC", repeat=3)
+
+MAX_CODON_LENGTH = 700 # 入力するコドン列の最大長
+MAX_LEN_DIFF = 0.03 # parsers.pyで使用する。
+
+# This is the standard residue order when coding codon type as a number.
+CODONS = itertools.product("ACGT", repeat=3) # all types of condon
+RESTYPES = ["".join(c) for c in CODONS]
+RESTYPE_ORDER = {restype: i for i, restype in enumerate(RESTYPES)}
+RESTYPE_NUM = len(RESTYPES)  # := 64.
+RESTYPE_PAD_NUM = RESTYPE_NUM + 1 # := 65
+RESTYPES_GAP = RESTYPES + ['---']
+RESTYPES_GAP_ORDER = {restype: i for i, restype in enumerate(RESTYPES_GAP)}
+
+PAD_RESTYPES = [''] + RESTYPES
+PAD_RESTYPES_GAP = [''] + RESTYPES + ['']
+TGT_FAA_PATH = '/home/slab/wataru_hiratani/work/data/sonicparanoid_exec/sonic_input/GCF_000009045.1_ASM904v1_translated_cds.faa' # B.subtillisのaas配列
+TGT_FNA_PATH = '/home/slab/wataru_hiratani/work/data/sonicparanoid_exec/cds_fna/GCF_000009045.1_ASM904v1_cds_from_genomic.fna' # B.subtillisのnucs配列
+
+USED_SPECIES_PATH = "/home/slab/wataru_hiratani/work/used_species.csv"
+
+
+#いつものやつ
+#codons = itertools.product("ATGC", repeat=3)
+#codons = ["".join(c) for c in codons]
+#vocab = ["<pad>"] + codons + ["<msk>"]
+
+ #平谷のやつ1/31
+#進捗用
+codons = itertools.product("ACGT", repeat=3)
 codons = ["".join(c) for c in codons]
 vocab = ["<pad>"] + codons + ["<msk>"]
+
 
 translation_map = {
     "TTT": "F", "TTC": "F",
@@ -34,8 +63,40 @@ translation_map = {
     "CGT": "R", "CGC": "R", "CGA": "R", "CGG": "R", "AGA": "R", "AGG": "R",
     "GGT": "G", "GGC": "G", "GGA": "G", "GGG": "G",
     "ATG": "M",
-    "TGG": "W"
+    "TGG": "W",
+    
+    "TAA":'*','TAG':'*','TGA':'*'
 }
+
+AAS = sorted(''.join(list(set(translation_map.values()))))
+PAD_AAS_GAP = [''] + AAS + ['']
+
+to_AAS_ORDER = {PAD_RESTYPES_GAP.index(x) : PAD_AAS_GAP.index(y) for x,y in translation_map.items()}
+to_PAD_AAS_GAP_INDEX = [-100 for x in range(len(PAD_RESTYPES_GAP))]
+for k,v in to_AAS_ORDER.items():
+    to_PAD_AAS_GAP_INDEX[k] = v
+to_PAD_AAS_GAP_INDEX = np.array(to_PAD_AAS_GAP_INDEX)
+to_PAD_AAS_GAP_INDEX[0] = 0 # PAD
+to_PAD_AAS_GAP_INDEX[65] = 22 # GAP
+
+# 4 BASE of the nucleotide.
+NUCS = ['A', 'C', 'G', 'T']
+
+def to_PAD_BASE_GAP_INDEX(position:int):
+
+    to_base_order = {PAD_RESTYPES_GAP.index(x) : NUCS.index(x[position - 1]) for x in translation_map.keys()}
+    to_pad_base_gap_index = [-100 for x in range(len(PAD_RESTYPES_GAP))]
+    for k,v in to_base_order.items():
+        to_pad_base_gap_index[k] = v
+    to_pad_base_gap_index = np.array(to_pad_base_gap_index)
+    to_pad_base_gap_index[0] = 0 # PAD
+    to_pad_base_gap_index[65] = 5 # GAP
+
+    return to_pad_base_gap_index
+
+to_PAD_FB_GAP_INDEX = to_PAD_BASE_GAP_INDEX(1)
+to_PAD_SB_GAP_INDEX = to_PAD_BASE_GAP_INDEX(2)
+to_PAD_tB_GAP_INDEX = to_PAD_BASE_GAP_INDEX(3)
 
 class GeneBatchLoader():
     def __init__(self, sql, batch_size, dataset_size):
@@ -131,3 +192,31 @@ def write_fna_faa(x, basename, prefix):
 
     to_file(x_str, "{}.fna".format(basename), "", prefix)
     to_file(x_aa, "{}.faa".format(basename), "", prefix)
+
+def write_fna_faa_2(x, basename, prefix):
+    trans = str.maketrans({
+        '<': '',
+        '>': '',
+        'p': '',
+        'a': '',
+        'd': '',
+        's': '',
+        'o': '',
+        'e': '',
+        'm': '',
+        'k': ''
+    })
+
+    # pad out after termination
+    for ter in [49, 51, 57]:
+        mask = torch.cumsum(x == ter, 1)
+        mask[x==ter] = 0
+        x[mask.bool()] = 0
+
+    x_str = to_seq(x.cpu(), vocab)
+    x_str = [x.translate(trans) for x in x_str]
+    x_aa = [to_aa(x) for x in x_str]
+
+    to_file(x_str, "{}.fna".format(basename), "", prefix)
+    to_file(x_aa, "{}.faa".format(basename), "", prefix)
+    
