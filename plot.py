@@ -51,7 +51,7 @@ for url in df['RefSeq FTP']:
     file_path_a = os.path.join(download_folder_a, os.path.basename(url) + '_translated_cds.faa.gz')
     file_path_c = os.path.join(download_folder_c, os.path.basename(url) + '_cds_from_genomic.fna.gz')
     
-    urllib.request.urlretrieve(url_fna, file_path_a)
+    urllib.request.urlretrieve(url_faa, file_path_a)
     with gzip.open(file_path_a, 'rb') as f_in, open(os.path.join(download_folder_a, os.path.basename(url) + '_translated_cds.faa'), 'wb') as f_out:
         shutil.copyfileobj(f_in, f_out)
     os.remove(file_path_a)
